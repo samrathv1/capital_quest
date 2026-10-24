@@ -391,19 +391,19 @@ ALTER TABLE simulation_runs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
 
 -- 5.1 Helper Security Functions
-CREATE OR REPLACE FUNCTION auth.get_user_role()
+CREATE OR REPLACE FUNCTION public.get_user_role()
 RETURNS user_role AS $$
     SELECT role FROM public.profiles WHERE id = auth.uid();
 $$ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp;
 
-CREATE OR REPLACE FUNCTION auth.is_super_admin()
+CREATE OR REPLACE FUNCTION public.is_super_admin()
 RETURNS BOOLEAN AS $$
-    SELECT (auth.get_user_role() = 'super_admin');
+    SELECT (public.get_user_role() = 'super_admin');
 $$ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp;
 
-CREATE OR REPLACE FUNCTION auth.is_staff()
+CREATE OR REPLACE FUNCTION public.is_staff()
 RETURNS BOOLEAN AS $$
-    SELECT auth.get_user_role() IN ('super_admin', 'domain_coordinator', 'volunteer');
+    SELECT public.get_user_role() IN ('super_admin', 'domain_coordinator', 'volunteer');
 $$ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp;
 
 -- 5.2 Policies
@@ -412,12 +412,12 @@ $$ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp;
 DROP POLICY IF EXISTS profiles_read_self_or_admin ON profiles;
 CREATE POLICY profiles_read_self_or_admin ON profiles
     FOR SELECT TO authenticated
-    USING (id = auth.uid() OR auth.is_super_admin());
+    USING (id = auth.uid() OR public.is_super_admin());
 
 DROP POLICY IF EXISTS profiles_admin_manage ON profiles;
 CREATE POLICY profiles_admin_manage ON profiles
     FOR ALL TO authenticated
-    USING (auth.is_super_admin());
+    USING (public.is_super_admin());
 
 -- EVENTS
 DROP POLICY IF EXISTS events_read_public ON events;
@@ -428,7 +428,7 @@ CREATE POLICY events_read_public ON events
 DROP POLICY IF EXISTS events_admin_mutate ON events;
 CREATE POLICY events_admin_mutate ON events
     FOR ALL TO authenticated
-    USING (auth.is_super_admin());
+    USING (public.is_super_admin());
 
 -- DOMAINS
 DROP POLICY IF EXISTS domains_read_public ON domains;
@@ -439,7 +439,7 @@ CREATE POLICY domains_read_public ON domains
 DROP POLICY IF EXISTS domains_admin_mutate ON domains;
 CREATE POLICY domains_admin_mutate ON domains
     FOR ALL TO authenticated
-    USING (auth.is_super_admin());
+    USING (public.is_super_admin());
 
 -- TEAMS
 DROP POLICY IF EXISTS teams_read_public ON teams;
@@ -450,7 +450,7 @@ CREATE POLICY teams_read_public ON teams
 DROP POLICY IF EXISTS teams_admin_mutate ON teams;
 CREATE POLICY teams_admin_mutate ON teams
     FOR ALL TO authenticated
-    USING (auth.is_super_admin());
+    USING (public.is_super_admin());
 
 -- TEAM MEMBERS
 DROP POLICY IF EXISTS team_members_read_public ON team_members;
@@ -461,7 +461,7 @@ CREATE POLICY team_members_read_public ON team_members
 DROP POLICY IF EXISTS team_members_admin_mutate ON team_members;
 CREATE POLICY team_members_admin_mutate ON team_members
     FOR ALL TO authenticated
-    USING (auth.is_super_admin());
+    USING (public.is_super_admin());
 
 -- ROUNDS
 DROP POLICY IF EXISTS rounds_read_public ON rounds;
@@ -472,19 +472,19 @@ CREATE POLICY rounds_read_public ON rounds
 DROP POLICY IF EXISTS rounds_admin_mutate ON rounds;
 CREATE POLICY rounds_admin_mutate ON rounds
     FOR ALL TO authenticated
-    USING (auth.is_super_admin());
+    USING (public.is_super_admin());
 
 -- DECISIONS
 DROP POLICY IF EXISTS decisions_read_staff ON decisions;
 CREATE POLICY decisions_read_staff ON decisions
     FOR SELECT TO authenticated
-    USING (auth.is_staff());
+    USING (public.is_staff());
 
 DROP POLICY IF EXISTS decisions_volunteer_manage ON decisions;
 CREATE POLICY decisions_volunteer_manage ON decisions
     FOR ALL TO authenticated
     USING (
-        auth.is_staff() AND 
+        public.is_staff() AND 
         EXISTS (
             SELECT 1 FROM rounds 
             WHERE rounds.id = decisions.round_id 
@@ -495,18 +495,18 @@ CREATE POLICY decisions_volunteer_manage ON decisions
 DROP POLICY IF EXISTS decisions_admin_all ON decisions;
 CREATE POLICY decisions_admin_all ON decisions
     FOR ALL TO authenticated
-    USING (auth.is_super_admin());
+    USING (public.is_super_admin());
 
 -- MARKET EVENTS
 DROP POLICY IF EXISTS market_events_read_public ON market_events;
 CREATE POLICY market_events_read_public ON market_events
     FOR SELECT TO anon, authenticated
-    USING (is_pre_announced = true OR auth.is_staff());
+    USING (is_pre_announced = true OR public.is_staff());
 
 DROP POLICY IF EXISTS market_events_admin_mutate ON market_events;
 CREATE POLICY market_events_admin_mutate ON market_events
     FOR ALL TO authenticated
-    USING (auth.is_super_admin());
+    USING (public.is_super_admin());
 
 -- INVESTMENT OFFERS
 DROP POLICY IF EXISTS investment_offers_read_public ON investment_offers;
@@ -517,7 +517,7 @@ CREATE POLICY investment_offers_read_public ON investment_offers
 DROP POLICY IF EXISTS investment_offers_admin_mutate ON investment_offers;
 CREATE POLICY investment_offers_admin_mutate ON investment_offers
     FOR ALL TO authenticated
-    USING (auth.is_super_admin());
+    USING (public.is_super_admin());
 
 -- FINANCIAL LEDGER
 DROP POLICY IF EXISTS financial_ledger_read_published ON financial_ledger;
@@ -528,13 +528,13 @@ CREATE POLICY financial_ledger_read_published ON financial_ledger
             SELECT 1 FROM rounds 
             WHERE rounds.id = financial_ledger.round_id 
             AND rounds.status = 'published'
-        ) OR auth.is_staff()
+        ) OR public.is_staff()
     );
 
 DROP POLICY IF EXISTS financial_ledger_admin_all ON financial_ledger;
 CREATE POLICY financial_ledger_admin_all ON financial_ledger
     FOR ALL TO authenticated
-    USING (auth.is_super_admin());
+    USING (public.is_super_admin());
 
 -- EQUITY TRANSACTIONS
 DROP POLICY IF EXISTS equity_transactions_read_published ON equity_transactions;
@@ -545,13 +545,13 @@ CREATE POLICY equity_transactions_read_published ON equity_transactions
             SELECT 1 FROM rounds 
             WHERE rounds.id = equity_transactions.round_id 
             AND rounds.status = 'published'
-        ) OR auth.is_staff()
+        ) OR public.is_staff()
     );
 
 DROP POLICY IF EXISTS equity_transactions_admin_all ON equity_transactions;
 CREATE POLICY equity_transactions_admin_all ON equity_transactions
     FOR ALL TO authenticated
-    USING (auth.is_super_admin());
+    USING (public.is_super_admin());
 
 -- COMPANY SNAPSHOTS
 DROP POLICY IF EXISTS snapshots_read_policy ON company_snapshots;
@@ -562,36 +562,36 @@ CREATE POLICY snapshots_read_policy ON company_snapshots
             SELECT 1 FROM rounds 
             WHERE rounds.id = company_snapshots.round_id 
             AND rounds.status = 'published'
-        )) OR auth.is_super_admin() OR auth.get_user_role() = 'judge'
+        )) OR public.is_super_admin() OR public.get_user_role() = 'judge'
     );
 
 DROP POLICY IF EXISTS snapshots_admin_all ON company_snapshots;
 CREATE POLICY snapshots_admin_all ON company_snapshots
     FOR ALL TO authenticated
-    USING (auth.is_super_admin());
+    USING (public.is_super_admin());
 
 -- SIMULATION RUNS
 DROP POLICY IF EXISTS simulation_runs_read_staff ON simulation_runs;
 CREATE POLICY simulation_runs_read_staff ON simulation_runs
     FOR SELECT TO authenticated
-    USING (auth.is_staff());
+    USING (public.is_staff());
 
 DROP POLICY IF EXISTS simulation_runs_admin_all ON simulation_runs;
 CREATE POLICY simulation_runs_admin_all ON simulation_runs
     FOR ALL TO authenticated
-    USING (auth.is_super_admin());
+    USING (public.is_super_admin());
 
 -- AUDIT LOGS
 DROP POLICY IF EXISTS audit_logs_read_admin ON audit_logs;
 CREATE POLICY audit_logs_read_admin ON audit_logs
     FOR SELECT TO authenticated
-    USING (auth.is_super_admin());
+    USING (public.is_super_admin());
 
 DROP POLICY IF EXISTS audit_logs_insert_authenticated ON audit_logs;
 DROP POLICY IF EXISTS audit_logs_insert_staff ON audit_logs;
 CREATE POLICY audit_logs_insert_staff ON audit_logs
     FOR INSERT TO authenticated
-    WITH CHECK (auth.is_staff());
+    WITH CHECK (public.is_staff());
 
 -- 6. STORED PROCEDURES & ATOMIC FUNCTIONS
 
