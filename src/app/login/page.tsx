@@ -133,31 +133,33 @@ function LoginContent() {
             </form>
 
             {/* DEVELOPMENT PREVIEW / DEMO ACCOUNT HELPER */}
-            <div className="pt-4 border-t border-slate-800/80 space-y-2">
-              <div className="flex items-center gap-1.5 text-xs font-mono text-slate-400">
-                <Sparkles className="h-3.5 w-3.5 text-amber-400" />
-                <span>Development Quick-Fill:</span>
-              </div>
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <button
-                  type="button"
-                  onClick={() => handleDemoFill('admin@capitalquest.dev')}
-                  className="p-2 rounded-lg bg-slate-800/60 hover:bg-slate-800 border border-slate-700/60 text-left transition-colors"
-                >
-                  <div className="font-semibold text-indigo-300">Super Admin</div>
-                  <div className="text-[10px] text-slate-400 truncate">admin@capitalquest.dev</div>
-                </button>
+            {process.env.NODE_ENV === 'development' && (
+              <div className="pt-4 border-t border-slate-800/80 space-y-2">
+                <div className="flex items-center gap-1.5 text-xs font-mono text-slate-400">
+                  <Sparkles className="h-3.5 w-3.5 text-amber-400" />
+                  <span>Development Quick-Fill:</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => handleDemoFill('admin@capitalquest.dev')}
+                    className="p-2 rounded-lg bg-slate-800/60 hover:bg-slate-800 border border-slate-700/60 text-left transition-colors"
+                  >
+                    <div className="font-semibold text-indigo-300">Super Admin</div>
+                    <div className="text-[10px] text-slate-400 truncate">admin@capitalquest.dev</div>
+                  </button>
 
-                <button
-                  type="button"
-                  onClick={() => handleDemoFill('volunteer@capitalquest.dev')}
-                  className="p-2 rounded-lg bg-slate-800/60 hover:bg-slate-800 border border-slate-700/60 text-left transition-colors"
-                >
-                  <div className="font-semibold text-emerald-300">Volunteer Operator</div>
-                  <div className="text-[10px] text-slate-400 truncate">volunteer@capitalquest.dev</div>
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDemoFill('volunteer@capitalquest.dev')}
+                    className="p-2 rounded-lg bg-slate-800/60 hover:bg-slate-800 border border-slate-700/60 text-left transition-colors"
+                  >
+                    <div className="font-semibold text-emerald-300">Volunteer Operator</div>
+                    <div className="text-[10px] text-slate-400 truncate">volunteer@capitalquest.dev</div>
+                  </button>
+                </div>
               </div>
-            </div>
+            )}
           </CardContent>
         </Card>
 

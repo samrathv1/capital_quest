@@ -3,7 +3,6 @@
 import * as React from 'react';
 import {
   AlertCircle,
-  Sparkles,
   Flag,
   ArrowRight,
 } from 'lucide-react';
@@ -117,28 +116,6 @@ export default function VolunteerEntryPage() {
   const cashDeficit = totalPlannedOutflow - availableCash;
   const isOverspent = cashDeficit > 0.001;
 
-  // F8: Auto-Scale R&D and Marketing to fit within cash
-  const handleAutoScale = () => {
-    const fixedOutflows = numOps + calculatedMfgCost;
-    if (fixedOutflows >= availableCash) {
-      setErrorMsg('Fixed manufacturing & operations exceed total available cash. Cannot auto-scale.');
-      return;
-    }
-
-    const discretionaryCash = availableCash - fixedOutflows;
-    const currentDiscretionary = numMkt + numRd;
-
-    if (currentDiscretionary > 0) {
-      const scaleFactor = discretionaryCash / currentDiscretionary;
-      const newMkt = Math.floor(numMkt * scaleFactor);
-      const newRd = Math.floor(discretionaryCash - newMkt);
-
-      setMarketingBudget(newMkt.toString());
-      setRdBudget(newRd.toString());
-      setErrorMsg(null);
-    }
-  };
-
   // F9: Flag slip as illegible
   const handleFlagSlip = async () => {
     if (!activeRound || !selectedTeamId) return;
@@ -198,7 +175,7 @@ export default function VolunteerEntryPage() {
       return;
     }
     if (isOverspent) {
-      setErrorMsg(`Planned cash outflow exceeds available cash by $${cashDeficit.toFixed(2)}. Press F8 to auto-scale.`);
+      setErrorMsg(`Planned cash outflow ($${totalPlannedOutflow.toFixed(2)}) exceeds available liquid cash ($${availableCash.toFixed(2)}) by $${cashDeficit.toFixed(2)}. Overspending decisions must be rejected per tournament rules. A corrected authorized decision sheet is required.`);
       return;
     }
 
@@ -243,20 +220,15 @@ export default function VolunteerEntryPage() {
     }
   };
 
-  const autoScaleRef = React.useRef(handleAutoScale);
-  autoScaleRef.current = handleAutoScale;
   const flagSlipRef = React.useRef(handleFlagSlip);
   flagSlipRef.current = handleFlagSlip;
   const submitRef = React.useRef(handleSubmit);
   submitRef.current = handleSubmit;
 
-  // Global Keyboard Navigation (F8, F9, Ctrl+Enter)
+  // Global Keyboard Navigation (F9, Ctrl+Enter)
   React.useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'F8') {
-        e.preventDefault();
-        autoScaleRef.current();
-      } else if (e.key === 'F9') {
+      if (e.key === 'F9') {
         e.preventDefault();
         flagSlipRef.current();
       } else if (e.key === 'Enter' && e.ctrlKey) {
@@ -328,9 +300,9 @@ export default function VolunteerEntryPage() {
           </div>
         </div>
 
-        {/* ERROR / OVERSPENT ALERT */}
+        {/* REJECTION NOTICE: OVERSPENDING DETECTED */}
         {isOverspent && (
-          <div className="p-4 rounded-xl border border-rose-500/60 bg-rose-950/60 text-rose-200 flex items-center justify-between gap-4 animate-in fade-in duration-150">
+          <div className="p-4 rounded-xl border border-rose-500/60 bg-rose-950/60 text-rose-200 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 animate-in fade-in duration-150">
             <div className="flex items-center gap-3">
               <AlertCircle className="h-6 w-6 text-rose-400 shrink-0" />
               <div>
@@ -338,21 +310,14 @@ export default function VolunteerEntryPage() {
                   OVERSPENDING DETECTED: Exceeds Liquid Cash by ${cashDeficit.toLocaleString('en-US', { minimumFractionDigits: 2 })}
                 </div>
                 <div className="text-xs text-rose-300/80">
-                  Total planned outflow is ${totalPlannedOutflow.toLocaleString('en-US', { minimumFractionDigits: 2 })}. Outflow cannot exceed treasury balance.
+                  Planned outflow is ${totalPlannedOutflow.toLocaleString('en-US', { minimumFractionDigits: 2 })} (Available Cash: ${availableCash.toLocaleString('en-US', { minimumFractionDigits: 2 })}). Official paper values are preserved; automatic modification is disabled per MVP rules. A corrected authorized decision sheet is required.
                 </div>
               </div>
             </div>
 
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={handleAutoScale}
-              className="border-rose-400/50 hover:bg-rose-500/20 text-rose-200 shrink-0 gap-1.5 font-mono text-xs"
-            >
-              <Sparkles className="h-3.5 w-3.5 text-amber-400" />
-              <span>[F8] Auto-Scale</span>
-            </Button>
+            <Badge variant="flagged" className="shrink-0 text-xs py-1 px-3">
+              REJECTION REQUIRED
+            </Badge>
           </div>
         )}
 

@@ -2,6 +2,7 @@ import { SupabaseClient } from '@supabase/supabase-js';
 import { AppError } from '@/lib/errors/app-error';
 import { DecisionSubmitInput, VoidRoundInput } from '@/lib/validation/api-schemas';
 import { D } from '@/engine/math/precision';
+import { assertOrganizerPoliciesApproved } from './organizer-approvals';
 
 /**
  * CAPITAL QUEST — BACKEND OPERATIONS SERVICE
@@ -200,16 +201,132 @@ export class TournamentService {
     return updatedRound;
   }
 
-  async publishRound(roundId: string, adminId: string) {
+  async openRound(roundId: string, adminId: string) {
     const round = await this.getRoundById(roundId);
-    if (round.status !== 'simulated' && round.status !== 'reviewed') {
+    if (round.status !== 'draft') {
+      throw new AppError('ROUND_NOT_DRAFT', `Cannot open round in status '${round.status}'. Round must be in 'draft' status.`);
+    }
+
+    // If round_number > 1, check that previous round is published
+    if (round.round_number > 1) {
+      const { data: prevRound } = await this.supabase
+        .from('rounds')
+        .select('id, status, round_number')
+        .eq('event_id', round.event_id)
+        .eq('round_number', round.round_number - 1)
+        .single();
+
+      if (!prevRound || prevRound.status !== 'published') {
+        throw new AppError(
+          'PREVIOUS_ROUND_NOT_PUBLISHED',
+          `Cannot open Round ${round.round_number}: Previous Round ${round.round_number - 1} must be 'published' first. Current status: ${prevRound?.status || 'missing'}.`
+        );
+      }
+    }
+
+    const { data: updatedRound, error: updateError } = await this.supabase
+      .from('rounds')
+      .update({
+        status: 'open',
+        opened_at: new Date().toISOString(),
+      })
+      .eq('id', roundId)
+      .select()
+      .single();
+
+    if (updateError) {
+      throw new AppError('SIMULATION_FAILED', `Failed to open round: ${updateError.message}`, 500);
+    }
+
+    await this.logAuditEvent({
+      actorId: adminId,
+      action: 'OPEN_ROUND',
+      entityName: 'rounds',
+      entityId: roundId,
+      beforeState: { status: round.status },
+      afterState: { status: 'open' },
+    });
+
+    return updatedRound;
+  }
+
+  async reviewRound(roundId: string, adminId: string) {
+    const round = await this.getRoundById(roundId);
+    if (round.status !== 'simulated') {
       throw new AppError(
         'ROUND_NOT_SIMULATED',
-        `Cannot publish round in status '${round.status}'. Round must be 'simulated' or 'reviewed'.`
+        `Cannot review round in status '${round.status}'. Round must be 'simulated' first.`
       );
     }
 
-    // Update round status
+    // Run reconciliation check
+    const reconciliation = await this.getFinancialReconciliation(roundId);
+    if (!reconciliation.isReconciled) {
+      throw new AppError(
+        'RECONCILIATION_FAILED',
+        `Financial reconciliation failed with ${reconciliation.errors.length} discrepancies. Review blockers must be resolved before proceeding.`,
+        422,
+        { discrepancies: reconciliation.errors }
+      );
+    }
+
+    const { data: updatedRound, error: updateError } = await this.supabase
+      .from('rounds')
+      .update({
+        status: 'reviewed',
+      })
+      .eq('id', roundId)
+      .select()
+      .single();
+
+    if (updateError) {
+      throw new AppError('SIMULATION_FAILED', `Failed to mark round as reviewed: ${updateError.message}`, 500);
+    }
+
+    await this.logAuditEvent({
+      actorId: adminId,
+      action: 'REVIEW_ROUND_RESULTS',
+      entityName: 'rounds',
+      entityId: roundId,
+      beforeState: { status: round.status },
+      afterState: { status: 'reviewed' },
+    });
+
+    return updatedRound;
+  }
+
+  async publishRound(roundId: string, adminId: string) {
+    const round = await this.getRoundById(roundId);
+    if (round.status !== 'reviewed') {
+      throw new AppError(
+        'ROUND_NOT_REVIEWED',
+        `Cannot publish round in status '${round.status}'. Round must be formally 'reviewed' and reconciled before publication.`
+      );
+    }
+
+    // Verify required organizer policy approvals
+    const approvalStatus = assertOrganizerPoliciesApproved(round.event_id);
+    if (!approvalStatus.approved) {
+      throw new AppError(
+        'POLICIES_NOT_APPROVED',
+        `Cannot publish round results: Required organizer policies have not been formally approved: ${approvalStatus.pendingPolicies.join(', ')}`,
+        403,
+        { pendingPolicies: approvalStatus.pendingPolicies }
+      );
+    }
+
+    // Re-verify financial reconciliation before official publication
+    const reconciliation = await this.getFinancialReconciliation(roundId);
+    if (!reconciliation.isReconciled) {
+      throw new AppError(
+        'RECONCILIATION_FAILED',
+        `Cannot publish: Financial reconciliation audit failed with discrepancies.`,
+        422,
+        { discrepancies: reconciliation.errors }
+      );
+    }
+
+    // Update round status to published
     const { data: updatedRound, error: updateError } = await this.supabase
       .from('rounds')
       .update({
@@ -224,7 +341,7 @@ export class TournamentService {
       throw new AppError('SIMULATION_FAILED', `Failed to publish round: ${updateError.message}`, 500);
     }
 
-    // Increment event active round
+    // Increment event active round pointer
     await this.supabase
       .from('events')
       .update({
@@ -565,6 +682,344 @@ export class TournamentService {
         netIncome: Number(row.net_income),
       };
     });
+  }
+
+  // 4b. FINANCIAL RECONCILIATION AUDIT
+  async getFinancialReconciliation(roundId: string) {
+    const { data: snapshots, error } = await this.supabase
+      .from('company_snapshots')
+      .select('*, teams(id, team_code, company_name, domain_id, domains(code, name))')
+      .eq('round_id', roundId)
+      .eq('is_active', true);
+
+    if (error) {
+      throw new AppError('NOT_FOUND', `Failed to load snapshots for reconciliation: ${error.message}`, 500);
+    }
+
+    const errors: string[] = [];
+    const checks = {
+      cashFlowContinuity: true,
+      treasurySolvency: true,
+      equityConservation: true,
+      inventoryConsistency: true,
+      valuationConsistency: true,
+    };
+
+    for (const snap of (snapshots || [])) {
+      const teamObj = snap.teams as unknown as { team_code?: string } | null;
+      const code = teamObj?.team_code || snap.team_id;
+      const endingCash = Number(snap.ending_cash);
+      const retainedEquity = Number(snap.retained_equity_pct);
+      const enterpriseValue = Number(snap.enterprise_value);
+      const cashValContribution = Number(snap.cash_valuation_contribution);
+      const finalValuation = Number(snap.company_valuation);
+      const unitsAvail = Number(snap.units_available);
+      const unitsSold = Number(snap.units_sold);
+      const endingInv = Number(snap.ending_inventory);
+
+      // Check 1: Treasury Solvency (no unauthorized negative ending cash)
+      if (endingCash < -0.01) {
+        checks.treasurySolvency = false;
+        errors.push(`Venture ${code}: Negative ending cash balance ($${endingCash.toFixed(2)}).`);
+      }
+
+      // Check 2: Equity Conservation (0 <= retainedEquity <= 100)
+      if (retainedEquity > 100.0001 || retainedEquity < 0) {
+        checks.equityConservation = false;
+        errors.push(`Venture ${code}: Retained equity percentage (${retainedEquity.toFixed(2)}%) out of bounds [0, 100].`);
+      }
+
+      // Check 3: Inventory Consistency (unitsAvail - unitsSold == endingInv)
+      if (Math.abs(unitsAvail - unitsSold - endingInv) > 1) {
+        checks.inventoryConsistency = false;
+        errors.push(`Venture ${code}: Inventory mismatch: ${unitsAvail} available - ${unitsSold} sold != ${endingInv} ending.`);
+      }
+
+      // Check 4: Valuation Formula Consistency (finalValuation = enterpriseValue + cashValContribution)
+      if (Math.abs(enterpriseValue + cashValContribution - finalValuation) > 0.1) {
+        checks.valuationConsistency = false;
+        errors.push(`Venture ${code}: Valuation mismatch: EV ($${enterpriseValue}) + Cash Contribution ($${cashValContribution}) != Total ($${finalValuation}).`);
+      }
+    }
+
+    return {
+      isReconciled: errors.length === 0,
+      totalCompaniesChecked: (snapshots || []).length,
+      checks,
+      errors,
+    };
+  }
+
+  // 4c. ROUND RESULTS AND RECONCILIATION
+  async getRoundResults(roundId: string) {
+    const round = await this.getRoundById(roundId);
+
+    // Fetch active snapshots
+    const { data: snapshots, error: snapError } = await this.supabase
+      .from('company_snapshots')
+      .select('*, teams(id, team_code, company_name, domain_id, table_station, domains(code, name))')
+      .eq('round_id', roundId)
+      .eq('is_active', true)
+      .order('tournament_rank', { ascending: true });
+
+    if (snapError) {
+      throw new AppError('NOT_FOUND', `Failed to load round snapshots: ${snapError.message}`, 500);
+    }
+
+    // Fetch decisions for this round
+    const { data: decisions } = await this.supabase
+      .from('decisions')
+      .select('*')
+      .eq('round_id', roundId);
+
+    const decisionMap = new Map((decisions || []).map(d => [d.team_id, d]));
+
+    // Fetch latest simulation run
+    const { data: latestRun } = await this.supabase
+      .from('simulation_runs')
+      .select('*, profiles(full_name, email)')
+      .eq('round_id', roundId)
+      .eq('is_active', true)
+      .order('run_version', { ascending: false })
+      .limit(1)
+      .single();
+
+    // Fetch previous round snapshots (to get starting cash for each company)
+    const prevCashMap = new Map<string, number>();
+    if (round.round_number > 1) {
+      const { data: prevRound } = await this.supabase
+        .from('rounds')
+        .select('id')
+        .eq('event_id', round.event_id)
+        .eq('round_number', round.round_number - 1)
+        .single();
+
+      if (prevRound) {
+        const { data: prevSnaps } = await this.supabase
+          .from('company_snapshots')
+          .select('team_id, ending_cash')
+          .eq('round_id', prevRound.id)
+          .eq('is_active', true);
+
+        for (const ps of (prevSnaps || [])) {
+          prevCashMap.set(ps.team_id, Number(ps.ending_cash));
+        }
+      }
+    }
+
+    const companyResults = (snapshots || []).map(snap => {
+      const teamObj = snap.teams as unknown as {
+        team_code?: string;
+        company_name?: string;
+        table_station?: string;
+        domains?: { code?: string; name?: string };
+      } | null;
+      const dec = decisionMap.get(snap.team_id);
+      const startingCash = prevCashMap.get(snap.team_id) ?? 1000000;
+
+      return {
+        id: snap.id,
+        teamId: snap.team_id,
+        teamCode: teamObj?.team_code || 'UNK',
+        companyName: teamObj?.company_name || 'Venture',
+        domainCode: teamObj?.domains?.code || 'TECH',
+        domainName: teamObj?.domains?.name || 'Technology',
+        tableStation: teamObj?.table_station,
+        startingCash,
+        // Spending decisions
+        marketingBudget: Number(dec?.marketing_budget || 0),
+        rdBudget: Number(dec?.rd_budget || 0),
+        operationsBudget: Number(dec?.operations_budget || 0),
+        productionUnits: Number(dec?.production_units || 0),
+        unitPrice: Number(dec?.unit_price || 0),
+        investmentDecision: dec?.investment_decision || 'none',
+        // Operational performance
+        productQualityIndex: Number(snap.product_quality_index),
+        brandEquityScore: Number(snap.brand_equity_score),
+        attractivenessScore: Number(snap.attractiveness_score),
+        marketSharePct: Number(snap.market_share_pct),
+        unitsSold: Number(snap.units_sold),
+        endingInventory: Number(snap.ending_inventory),
+        // Financials
+        grossRevenue: Number(snap.gross_revenue),
+        cogs: Number(snap.cogs),
+        grossProfit: Number(snap.gross_profit),
+        operatingExpenses: Number(snap.operating_expenses),
+        ebitda: Number(snap.ebitda),
+        taxExpense: Number(snap.tax_expense),
+        netIncome: Number(snap.net_income),
+        operatingCashFlow: Number(snap.operating_cash_flow),
+        financingCashFlow: Number(snap.financing_cash_flow),
+        endingCash: Number(snap.ending_cash),
+        // Valuation & ranking
+        enterpriseValue: Number(snap.enterprise_value),
+        cashValuationContribution: Number(snap.cash_valuation_contribution),
+        companyValuation: Number(snap.company_valuation),
+        retainedEquityPct: Number(snap.retained_equity_pct),
+        equityAdjustedScore: Number(snap.equity_adjusted_score),
+        domainRank: snap.domain_rank,
+        tournamentRank: snap.tournament_rank,
+      };
+    });
+
+    const reconciliation = await this.getFinancialReconciliation(roundId);
+    const eventObj = round.events as unknown as { name?: string } | null;
+
+    return {
+      round: {
+        id: round.id,
+        roundNumber: round.round_number,
+        type: round.type,
+        status: round.status,
+        openedAt: round.opened_at,
+        lockedAt: round.locked_at,
+        simulatedAt: round.simulated_at,
+        publishedAt: round.published_at,
+        eventName: eventObj?.name || 'Capital Quest Competition',
+      },
+      latestRun: latestRun || null,
+      results: companyResults,
+      reconciliation,
+    };
+  }
+
+  // 4d. SIMULATION RUN HISTORY
+  async getSimulationRuns(roundId: string) {
+    const { data, error } = await this.supabase
+      .from('simulation_runs')
+      .select('*, profiles(full_name, email)')
+      .eq('round_id', roundId)
+      .order('run_version', { ascending: false });
+
+    if (error) {
+      throw new AppError('NOT_FOUND', `Failed to load simulation runs: ${error.message}`, 500);
+    }
+    return data || [];
+  }
+
+  // 4e. ROUNDS OVERVIEW ACROSS EVENT
+  async getRoundsOverview(eventId: string) {
+    const { data: rounds, error: roundsError } = await this.supabase
+      .from('rounds')
+      .select('*')
+      .eq('event_id', eventId)
+      .order('round_number', { ascending: true });
+
+    if (roundsError) {
+      throw new AppError('NOT_FOUND', `Failed to load rounds: ${roundsError.message}`, 500);
+    }
+
+    const { data: teams } = await this.supabase
+      .from('teams')
+      .select('id, team_code, is_disqualified')
+      .eq('event_id', eventId)
+      .eq('is_disqualified', false);
+
+    const eligibleCount = (teams || []).length;
+
+    // Fetch decisions for all rounds
+    const { data: allDecisions } = await this.supabase
+      .from('decisions')
+      .select('round_id, team_id, status');
+
+    // Fetch market events
+    const { data: marketEvents } = await this.supabase
+      .from('market_events')
+      .select('*')
+      .eq('event_id', eventId);
+
+    // Fetch latest simulation runs
+    const { data: simRuns } = await this.supabase
+      .from('simulation_runs')
+      .select('round_id, id, run_version, status, is_active, created_at, execution_duration_ms')
+      .eq('is_active', true);
+
+    const runMap = new Map((simRuns || []).map(r => [r.round_id, r]));
+
+    const decisionsByRound = new Map<string, Array<{ team_id: string; status: string }>>();
+    for (const d of (allDecisions || [])) {
+      if (!decisionsByRound.has(d.round_id)) {
+        decisionsByRound.set(d.round_id, []);
+      }
+      decisionsByRound.get(d.round_id)!.push(d);
+    }
+
+    const policyApproval = assertOrganizerPoliciesApproved(eventId);
+
+    const roundsOverview = (rounds || []).map(r => {
+      const decs = decisionsByRound.get(r.id) || [];
+      const entered = decs.filter(d => d.status === 'entered').length;
+      const verified = decs.filter(d => d.status === 'verified' || d.status === 'locked').length;
+      const flagged = decs.filter(d => d.status === 'flagged').length;
+      const submittedTeamIds = new Set(decs.map(d => d.team_id));
+      const missing = Math.max(0, eligibleCount - submittedTeamIds.size);
+
+      const activeEvent = (marketEvents || []).find(me => me.activation_round === r.round_number);
+      const latestRun = runMap.get(r.id);
+
+      // Compute state transition blockers
+      const blockers: string[] = [];
+      if (r.status === 'draft') {
+        if (r.round_number > 1) {
+          const prev = (rounds || []).find(pr => pr.round_number === r.round_number - 1);
+          if (prev && prev.status !== 'published') {
+            blockers.push(`Round ${r.round_number - 1} must be published first.`);
+          }
+        }
+      } else if (r.status === 'open') {
+        if (missing > 0) blockers.push(`${missing} teams have not submitted decision slips.`);
+        if (flagged > 0) blockers.push(`${flagged} slips have flagged discrepancies.`);
+        if (entered > 0) blockers.push(`${entered} slips pending dual-verification.`);
+      } else if (r.status === 'locked') {
+        if (!policyApproval.approved) {
+          blockers.push(`Organizer policies pending: ${policyApproval.pendingPolicies.join(', ')}`);
+        }
+      } else if (r.status === 'simulated') {
+        blockers.push('Round results must be formally reviewed and reconciled.');
+      }
+
+      return {
+        id: r.id,
+        roundNumber: r.round_number,
+        type: r.type,
+        status: r.status,
+        openedAt: r.opened_at,
+        lockedAt: r.locked_at,
+        simulatedAt: r.simulated_at,
+        publishedAt: r.published_at,
+        eligibleCompaniesCount: eligibleCount,
+        decisionStats: {
+          total: eligibleCount,
+          entered,
+          verified,
+          flagged,
+          missing,
+          isAllVerified: eligibleCount > 0 && verified === eligibleCount,
+        },
+        marketEvent: activeEvent ? {
+          name: activeEvent.name,
+          description: activeEvent.description,
+          demandMultiplier: Number(activeEvent.demand_multiplier),
+          costMultiplier: Number(activeEvent.cost_multiplier),
+        } : null,
+        latestRun: latestRun || null,
+        blockers,
+        canOpen: r.status === 'draft' && blockers.length === 0,
+        canLock: r.status === 'open' && (missing === 0 && flagged === 0 && entered === 0),
+        canSimulate: r.status === 'locked' && policyApproval.approved,
+        canReview: r.status === 'simulated',
+        canPublish: r.status === 'reviewed',
+        canVoid: r.status === 'simulated' || r.status === 'reviewed',
+      };
+    });
+
+    return {
+      eventId,
+      eligibleCompaniesCount: eligibleCount,
+      allPoliciesApproved: policyApproval.approved,
+      pendingPolicies: policyApproval.pendingPolicies,
+      rounds: roundsOverview,
+    };
   }
 
   // 5. AUDIT LOGGING

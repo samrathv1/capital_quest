@@ -117,26 +117,21 @@ describe('Phase 3: Volunteer Console, Dual-Verification & Admin Operations', () 
       expect(deficit).toBeGreaterThan(0);
     });
 
-    it('correctly executes F8 auto-scale algorithm to fit discretionary budget into available cash', () => {
+    it('strictly rejects overspending decisions without automatic modification', () => {
       const availableCash = 600000;
       const fixedOps = 100000;
       const mfgCost = 200000;
-      const fixedOutflow = fixedOps + mfgCost; // 300,000
-
       const originalMkt = 250000;
       const originalRd = 250000;
-      const currentDiscretionary = originalMkt + originalRd; // 500,000 (total = 800k, 200k overspent!)
 
-      const discretionaryBudget = availableCash - fixedOutflow; // 300,000 allowed
-      const scaleFactor = discretionaryBudget / currentDiscretionary; // 0.6
+      const totalOutflow = fixedOps + mfgCost + originalMkt + originalRd; // 800,000
+      const deficit = totalOutflow - availableCash; // 200,000
 
-      const scaledMkt = Math.floor(originalMkt * scaleFactor); // 150,000
-      const scaledRd = Math.floor(discretionaryBudget - scaledMkt); // 150,000
-
-      const finalTotal = fixedOutflow + scaledMkt + scaledRd;
-      expect(finalTotal).toBe(availableCash); // Exactly matches $600,000
-      expect(scaledMkt).toBe(150000);
-      expect(scaledRd).toBe(150000);
+      // Rejection rules: preserve values, do not auto-modify, provide exact deficit
+      expect(deficit).toBe(200000);
+      expect(originalMkt).toBe(250000); // Unaltered
+      expect(originalRd).toBe(250000); // Unaltered
+      expect(totalOutflow > availableCash).toBe(true);
     });
   });
 

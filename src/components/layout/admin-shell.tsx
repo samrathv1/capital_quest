@@ -15,6 +15,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Sliders,
+  PlayCircle,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -61,6 +62,12 @@ export function AdminShell({
       href: '/admin/dashboard',
       icon: LayoutDashboard,
       roles: ['super_admin', 'judge'],
+    },
+    {
+      title: 'Round Control',
+      href: '/admin/rounds',
+      icon: PlayCircle,
+      roles: ['super_admin'],
     },
     {
       title: 'Teams & Rosters',

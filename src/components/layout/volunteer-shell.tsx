@@ -119,7 +119,6 @@ export function VolunteerShell({
           <span className="text-slate-500 font-semibold uppercase tracking-wider text-[10px]">Hotkeys:</span>
           <span><kbd className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-200 border border-slate-700">Tab / Enter</kbd> Next Field</span>
           <span><kbd className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-200 border border-slate-700">Shift + Tab</kbd> Previous Field</span>
-          <span><kbd className="px-1.5 py-0.5 rounded bg-slate-800 text-indigo-300 border border-indigo-700">F8</kbd> Auto-Scale Outflow</span>
           <span><kbd className="px-1.5 py-0.5 rounded bg-slate-800 text-rose-300 border border-rose-700">F9</kbd> Flag Illegible Slip</span>
           <span><kbd className="px-1.5 py-0.5 rounded bg-slate-800 text-emerald-300 border border-emerald-700">Ctrl + Enter</kbd> Submit & Next</span>
         </div>
