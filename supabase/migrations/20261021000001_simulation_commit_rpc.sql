@@ -28,7 +28,11 @@ BEGIN
     -- 1. ADVISORY LOCK: Prevent race conditions across parallel simulation triggers
     PERFORM pg_advisory_xact_lock(hashtext('capital_quest_sim_' || p_round_id::text));
 
-    -- 2. VERIFY CALLER IS SUPER ADMIN
+    -- 2. VERIFY CALLER IS SUPER ADMIN & PREVENT ADMINISTRATOR IMPERSONATION
+    IF auth.uid() IS NOT NULL AND auth.uid() != p_admin_id THEN
+        RAISE EXCEPTION 'Security Violation: Caller UID (%) does not match administrator ID (%). Impersonation prevented.', auth.uid(), p_admin_id;
+    END IF;
+
     IF (SELECT role FROM profiles WHERE id = p_admin_id) != 'super_admin' THEN
         RAISE EXCEPTION 'Unauthorized: Only Super Admin can execute and commit simulations.';
     END IF;
@@ -237,4 +241,9 @@ BEGIN
         'equity_count', v_inserted_equity
     );
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp;
+
+-- SEC-02: Restrict privileged execution to service_role and verified administrators
+REVOKE EXECUTE ON FUNCTION fn_commit_simulation_run(UUID, UUID, TEXT, TEXT, INTEGER, INTEGER, BOOLEAN, JSONB, JSONB, JSONB, JSONB) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION fn_commit_simulation_run(UUID, UUID, TEXT, TEXT, INTEGER, INTEGER, BOOLEAN, JSONB, JSONB, JSONB, JSONB) TO service_role;
+

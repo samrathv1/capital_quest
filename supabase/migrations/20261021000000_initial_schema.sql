@@ -394,17 +394,17 @@ ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
 CREATE OR REPLACE FUNCTION auth.get_user_role()
 RETURNS user_role AS $$
     SELECT role FROM public.profiles WHERE id = auth.uid();
-$$ LANGUAGE sql STABLE SECURITY DEFINER;
+$$ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp;
 
 CREATE OR REPLACE FUNCTION auth.is_super_admin()
 RETURNS BOOLEAN AS $$
     SELECT (auth.get_user_role() = 'super_admin');
-$$ LANGUAGE sql STABLE SECURITY DEFINER;
+$$ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp;
 
 CREATE OR REPLACE FUNCTION auth.is_staff()
 RETURNS BOOLEAN AS $$
     SELECT auth.get_user_role() IN ('super_admin', 'domain_coordinator', 'volunteer');
-$$ LANGUAGE sql STABLE SECURITY DEFINER;
+$$ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp;
 
 -- 5.2 Policies
 
@@ -588,9 +588,10 @@ CREATE POLICY audit_logs_read_admin ON audit_logs
     USING (auth.is_super_admin());
 
 DROP POLICY IF EXISTS audit_logs_insert_authenticated ON audit_logs;
-CREATE POLICY audit_logs_insert_authenticated ON audit_logs
+DROP POLICY IF EXISTS audit_logs_insert_staff ON audit_logs;
+CREATE POLICY audit_logs_insert_staff ON audit_logs
     FOR INSERT TO authenticated
-    WITH CHECK (true);
+    WITH CHECK (auth.is_staff());
 
 -- 6. STORED PROCEDURES & ATOMIC FUNCTIONS
 
@@ -609,6 +610,11 @@ DECLARE
     v_voided_ledger INTEGER := 0;
     v_voided_equity INTEGER := 0;
 BEGIN
+    -- 0. Caller verification: Prevent administrator UUID impersonation
+    IF auth.uid() IS NOT NULL AND auth.uid() != p_admin_id THEN
+        RAISE EXCEPTION 'Security Violation: Caller UID (%) does not match administrator ID (%). Impersonation prevented.', auth.uid(), p_admin_id;
+    END IF;
+
     -- 1. Verify caller is super_admin
     IF (SELECT role FROM profiles WHERE id = p_admin_id) != 'super_admin' THEN
         RAISE EXCEPTION 'Unauthorized: Only Super Admin can execute round corrections.';
@@ -703,4 +709,9 @@ BEGIN
         'voided_equity_records', v_voided_equity
     );
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp;
+
+-- SEC-02: Restrict privileged execution to service_role and verified administrators
+REVOKE EXECUTE ON FUNCTION fn_void_or_supersede_round(UUID, UUID, TEXT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION fn_void_or_supersede_round(UUID, UUID, TEXT) TO service_role;
+
