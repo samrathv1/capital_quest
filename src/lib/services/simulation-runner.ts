@@ -350,9 +350,13 @@ export function serializeLedgerEntriesForDatabase(
 
 /**
  * Builds cap-table equity transactions for accepted investment offers.
+ * When subsequent funding rounds occur (e.g. Series A in Round 4),
+ * prior non-founding investors are diluted by the round's dilutionFactor,
+ * guaranteeing strict 100.0000% equity conservation across the full cap table.
  */
 export function serializeEquityTransactionsForDatabase(
-  simulationResult: TournamentSimulationResult
+  simulationResult: TournamentSimulationResult,
+  priorNonFoundingInvestorsMap?: Map<string, Array<{ shareholder_name: string; post_round_equity_pct: number }>>
 ): Array<Record<string, unknown>> {
   const equityRows: Array<Record<string, unknown>> = [];
 
@@ -389,6 +393,24 @@ export function serializeEquityTransactionsForDatabase(
         post_round_equity_pct: postFounding.toFixed(4),
         investment_amount: '0.00',
       });
+
+      // 3. Dilute prior non-founding investors proportionally
+      const priorInvestors = priorNonFoundingInvestorsMap?.get(res.teamId) || [];
+      for (const prior of priorInvestors) {
+        const priorPre = D(prior.post_round_equity_pct);
+        const priorPost = priorPre.mul(res.equity.dilutionFactor).toDecimalPlaces(4, Decimal.ROUND_HALF_UP);
+        const priorDelta = priorPost.sub(priorPre);
+
+        equityRows.push({
+          team_id: res.teamId,
+          shareholder_name: prior.shareholder_name,
+          is_founding_team: false,
+          pre_round_equity_pct: priorPre.toFixed(4),
+          dilution_delta_pct: priorDelta.toFixed(4),
+          post_round_equity_pct: priorPost.toFixed(4),
+          investment_amount: '0.00',
+        });
+      }
     }
   }
 
@@ -579,7 +601,33 @@ export async function executeSimulationRound(
   // 8. Serialize Results for Database Persistence
   const dbSnapshots = serializeSnapshotsForDatabase(simulationResult);
   const dbLedgerEntries = serializeLedgerEntriesForDatabase(simulationResult, previousSnapshotMap);
-  const dbEquityEntries = serializeEquityTransactionsForDatabase(simulationResult);
+
+  const priorNonFoundingInvestorsMap = new Map<string, Array<{ shareholder_name: string; post_round_equity_pct: number }>>();
+  if (round.round_number > 2) {
+    const teamIds = simulationResult.companyResults.map(r => r.teamId);
+    const { data: priorTxs } = await supabaseClient
+      .from('equity_transactions')
+      .select('team_id, shareholder_name, post_round_equity_pct, created_at')
+      .in('team_id', teamIds)
+      .eq('is_founding_team', false)
+      .eq('is_voided', false)
+      .order('created_at', { ascending: false });
+
+    if (priorTxs) {
+      for (const tx of priorTxs) {
+        const list = priorNonFoundingInvestorsMap.get(tx.team_id) || [];
+        if (!list.some(p => p.shareholder_name === tx.shareholder_name)) {
+          list.push({
+            shareholder_name: tx.shareholder_name,
+            post_round_equity_pct: Number(tx.post_round_equity_pct),
+          });
+          priorNonFoundingInvestorsMap.set(tx.team_id, list);
+        }
+      }
+    }
+  }
+
+  const dbEquityEntries = serializeEquityTransactionsForDatabase(simulationResult, priorNonFoundingInvestorsMap);
 
   const executionDurationMs = Date.now() - startTime;
   const effectiveIdempotencyKey =

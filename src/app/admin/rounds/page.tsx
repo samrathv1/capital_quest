@@ -209,6 +209,7 @@ export default function AdminRoundsPage() {
           cashValuationPolicyApproved: true,
           corporateTaxationApproved: true,
           standardVCOffersApproved: true,
+          strictSpendingRejectionApproved: true,
           proRataScalingApproved: true,
           approvedBy: approverName.trim(),
         }),
@@ -907,19 +908,19 @@ export default function AdminRoundsPage() {
                 </Badge>
               </div>
               <p className="text-slate-400">
-                Round 2 Seed: $500,000 for 15% equity. Round 4 Series A: $1,500,000 for 20% equity. Equity is strictly conserved.
+                Round 2 Seed ($400,000 for 25.0% or $200,000 for 12.5%). Round 4 Series A ($800,000 for 20.0% or $450,000 for 10.0%). Equity is strictly conserved.
               </p>
             </div>
 
             <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs space-y-1">
               <div className="flex items-center justify-between">
-                <strong className="text-slate-200">4. Minor Deficit Pro-Rata Scaling (&lt;5%)</strong>
+                <strong className="text-slate-200">4. Strict Spending Solvency Policy</strong>
                 <Badge variant={data?.organizerPolicies.allApproved ? 'success' : 'warning'} className="text-[10px]">
                   {data?.organizerPolicies.allApproved ? 'APPROVED' : 'PENDING'}
                 </Badge>
               </div>
               <p className="text-slate-400">
-                During simulation processing, minor cash deficits (&lt;5% of total budget) are scaled down pro-rata across discretionary categories to prevent unexpected insolvency. Deficits &ge;5% are rejected at volunteer entry.
+                Strict rejection of overspending decisions. Total planned cash expenditures (marketing, R&amp;D, operations, production) must not exceed available liquid cash. Zero automatic paper scaling is permitted.
               </p>
             </div>
           </div>

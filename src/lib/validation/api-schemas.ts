@@ -36,7 +36,8 @@ export const OrganizerApprovalSchema = z.object({
   cashValuationPolicyApproved: z.boolean().default(true),
   corporateTaxationApproved: z.boolean().default(true),
   standardVCOffersApproved: z.boolean().default(true),
-  proRataScalingApproved: z.boolean().default(true),
+  strictSpendingRejectionApproved: z.boolean().default(true),
+  proRataScalingApproved: z.boolean().optional(),
   approvedBy: z.string().min(1, 'Approver name or ID required'),
 });
 

@@ -68,7 +68,7 @@ graph TD
 
 #### Stage 3: Domain Constraint & Sanity Validation
 - Verify that every active team has a valid decision record.
-- Verify that no team has planned cash outflows exceeding its available beginning cash balance. If a minor deficit exists ($< 5\%$), trigger the automated pro-rata scaling rule.
+- Verify that no team has planned cash outflows exceeding its available beginning cash balance. Per MVP tournament rules, overspending decisions are strictly rejected with zero automatic paper scaling; authorized decision correction is required before round locking.
 - If unresolvable violations exist, abort the transaction and raise a descriptive error without modifying database state.
 
 #### Stage 4: Intra-Domain Competitive Market Resolution

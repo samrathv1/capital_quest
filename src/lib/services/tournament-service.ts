@@ -686,6 +686,8 @@ export class TournamentService {
 
   // 4b. FINANCIAL RECONCILIATION AUDIT
   async getFinancialReconciliation(roundId: string) {
+    const round = await this.getRoundById(roundId);
+
     const { data: snapshots, error } = await this.supabase
       .from('company_snapshots')
       .select('*, teams(id, team_code, company_name, domain_id, domains(code, name))')
@@ -696,55 +698,269 @@ export class TournamentService {
       throw new AppError('NOT_FOUND', `Failed to load snapshots for reconciliation: ${error.message}`, 500);
     }
 
+    // Fetch previous round snapshots (to get starting cash for each company)
+    const prevCashMap = new Map<string, number>();
+    if (round.round_number > 1) {
+      const { data: prevRound } = await this.supabase
+        .from('rounds')
+        .select('id')
+        .eq('event_id', round.event_id)
+        .eq('round_number', round.round_number - 1)
+        .single();
+
+      if (prevRound) {
+        const { data: prevSnaps } = await this.supabase
+          .from('company_snapshots')
+          .select('team_id, ending_cash')
+          .eq('round_id', prevRound.id)
+          .eq('is_active', true);
+
+        for (const ps of (prevSnaps || [])) {
+          prevCashMap.set(ps.team_id, Number(ps.ending_cash));
+        }
+      }
+    }
+
+    // Fetch financial ledger entries for this round to cross-audit cash movements
+    const { data: ledgerEntries } = await this.supabase
+      .from('financial_ledger')
+      .select('team_id, amount')
+      .eq('round_id', roundId)
+      .eq('is_voided', false);
+
+    const ledgerNetDeltaMap = new Map<string, number>();
+    for (const le of (ledgerEntries || [])) {
+      const current = ledgerNetDeltaMap.get(le.team_id) || 0;
+      ledgerNetDeltaMap.set(le.team_id, current + Number(le.amount));
+    }
+
+    // Fetch equity transactions for this round to audit 100.0000% cap-table conservation
+    const { data: equityTxs } = await this.supabase
+      .from('equity_transactions')
+      .select('team_id, shareholder_name, is_founding_team, pre_round_equity_pct, dilution_delta_pct, post_round_equity_pct')
+      .eq('round_id', roundId)
+      .eq('is_voided', false);
+
+    const equityByTeamMap = new Map<string, Array<{
+      shareholder_name: string;
+      is_founding_team: boolean;
+      pre_round_equity_pct: number;
+      dilution_delta_pct: number;
+      post_round_equity_pct: number;
+    }>>();
+    for (const eq of (equityTxs || [])) {
+      const list = equityByTeamMap.get(eq.team_id) || [];
+      list.push({
+        shareholder_name: eq.shareholder_name,
+        is_founding_team: eq.is_founding_team,
+        pre_round_equity_pct: Number(eq.pre_round_equity_pct),
+        dilution_delta_pct: Number(eq.dilution_delta_pct),
+        post_round_equity_pct: Number(eq.post_round_equity_pct),
+      });
+      equityByTeamMap.set(eq.team_id, list);
+    }
+
     const errors: string[] = [];
-    const checks = {
-      cashFlowContinuity: true,
-      treasurySolvency: true,
-      equityConservation: true,
-      inventoryConsistency: true,
-      valuationConsistency: true,
-    };
+    const cashFlowFailures: Array<{ companyName: string; detail: string }> = [];
+    const solvencyFailures: Array<{ companyName: string; detail: string }> = [];
+    const equityFailures: Array<{ companyName: string; detail: string }> = [];
+    const inventoryFailures: Array<{ companyName: string; detail: string }> = [];
+    const valuationFailures: Array<{ companyName: string; detail: string }> = [];
+
+    let cashFlowBalancedCount = 0;
+    let solvencyPassedCount = 0;
+    let equitySumBalancedCount = 0;
+    let inventoryConsistentCount = 0;
+    let valuationConsistentCount = 0;
 
     for (const snap of (snapshots || [])) {
-      const teamObj = snap.teams as unknown as { team_code?: string } | null;
+      const teamObj = snap.teams as unknown as { team_code?: string; company_name?: string } | null;
       const code = teamObj?.team_code || snap.team_id;
+      const companyName = teamObj?.company_name || `Venture ${code}`;
+
+      const startingCash = Number(snap.starting_cash ?? prevCashMap.get(snap.team_id) ?? 1000000);
       const endingCash = Number(snap.ending_cash);
+      const ocf = snap.operating_cash_flow !== undefined
+        ? Number(snap.operating_cash_flow)
+        : (snap.net_income !== undefined ? Number(snap.net_income) : 0);
+      const fcf = snap.financing_cash_flow !== undefined
+        ? Number(snap.financing_cash_flow)
+        : 0;
       const retainedEquity = Number(snap.retained_equity_pct);
       const enterpriseValue = Number(snap.enterprise_value);
       const cashValContribution = Number(snap.cash_valuation_contribution);
       const finalValuation = Number(snap.company_valuation);
+      const finalScore = Number(snap.equity_adjusted_score ?? snap.final_score ?? 0);
       const unitsAvail = Number(snap.units_available);
       const unitsSold = Number(snap.units_sold);
       const endingInv = Number(snap.ending_inventory);
 
       // Check 1: Treasury Solvency (no unauthorized negative ending cash)
-      if (endingCash < -0.01) {
-        checks.treasurySolvency = false;
-        errors.push(`Venture ${code}: Negative ending cash balance ($${endingCash.toFixed(2)}).`);
+      if (endingCash >= -0.01) {
+        solvencyPassedCount++;
+      } else {
+        const detail = `Negative ending cash balance ($${endingCash.toFixed(2)}).`;
+        solvencyFailures.push({ companyName, detail });
+        errors.push(`Venture ${code}: ${detail}`);
       }
 
-      // Check 2: Equity Conservation (0 <= retainedEquity <= 100)
-      if (retainedEquity > 100.0001 || retainedEquity < 0) {
-        checks.equityConservation = false;
-        errors.push(`Venture ${code}: Retained equity percentage (${retainedEquity.toFixed(2)}%) out of bounds [0, 100].`);
+      // Check 2: Cash Flow Continuity
+      // ending_cash = max(0, startingCash + OCF + FCF)
+      const expectedRawEndingCash = startingCash + ocf + fcf;
+      const expectedEndingCash = Math.max(0, expectedRawEndingCash);
+      let cashFlowOk = Math.abs(endingCash - expectedEndingCash) < 0.05;
+
+      // If ledger entries exist, verify ending cash matches ledger sum
+      const ledgerNet = ledgerNetDeltaMap.get(snap.team_id);
+      if (ledgerNet !== undefined) {
+        const expectedLedgerEnding = Math.max(0, startingCash + ledgerNet);
+        if (Math.abs(endingCash - expectedLedgerEnding) >= 0.05) {
+          cashFlowOk = false;
+        }
       }
 
-      // Check 3: Inventory Consistency (unitsAvail - unitsSold == endingInv)
-      if (Math.abs(unitsAvail - unitsSold - endingInv) > 1) {
-        checks.inventoryConsistency = false;
-        errors.push(`Venture ${code}: Inventory mismatch: ${unitsAvail} available - ${unitsSold} sold != ${endingInv} ending.`);
+      if (cashFlowOk) {
+        cashFlowBalancedCount++;
+      } else {
+        const detail = `Cash mismatch: Beg ($${startingCash.toFixed(2)}) + OCF ($${ocf.toFixed(2)}) + FCF ($${fcf.toFixed(2)}) != End ($${endingCash.toFixed(2)}).`;
+        cashFlowFailures.push({ companyName, detail });
+        errors.push(`Venture ${code}: ${detail}`);
       }
 
-      // Check 4: Valuation Formula Consistency (finalValuation = enterpriseValue + cashValContribution)
-      if (Math.abs(enterpriseValue + cashValContribution - finalValuation) > 0.1) {
-        checks.valuationConsistency = false;
-        errors.push(`Venture ${code}: Valuation mismatch: EV ($${enterpriseValue}) + Cash Contribution ($${cashValContribution}) != Total ($${finalValuation}).`);
+      // Check 3: Equity Conservation & Cap Table 100.0000%
+      let equityOk = true;
+      if (retainedEquity < 0 || retainedEquity > 100.0001) {
+        equityOk = false;
+        const detail = `Retained founder equity (${retainedEquity.toFixed(4)}%) out of bounds [0, 100].`;
+        equityFailures.push({ companyName, detail });
+        errors.push(`Venture ${code}: ${detail}`);
+      }
+
+      const teamEquityTxs = equityByTeamMap.get(snap.team_id);
+      if (teamEquityTxs && teamEquityTxs.length > 0) {
+        let totalPostEquity = 0;
+        const seenShareholders = new Set<string>();
+        let hasDuplicate = false;
+
+        for (const tx of teamEquityTxs) {
+          if (tx.post_round_equity_pct < -0.0001) {
+            equityOk = false;
+            const detail = `Investor ${tx.shareholder_name} has negative stake (${tx.post_round_equity_pct.toFixed(4)}%).`;
+            equityFailures.push({ companyName, detail });
+            errors.push(`Venture ${code}: ${detail}`);
+          }
+          if (seenShareholders.has(tx.shareholder_name)) {
+            hasDuplicate = true;
+          }
+          seenShareholders.add(tx.shareholder_name);
+          totalPostEquity += tx.post_round_equity_pct;
+        }
+
+        if (hasDuplicate) {
+          equityOk = false;
+          const detail = `Duplicate equity transaction recorded for shareholder in round.`;
+          equityFailures.push({ companyName, detail });
+          errors.push(`Venture ${code}: ${detail}`);
+        }
+
+        if (Math.abs(totalPostEquity - 100.0000) > 0.01) {
+          equityOk = false;
+          const detail = `Cap table does not sum to 100.0000%: Total = ${totalPostEquity.toFixed(4)}%.`;
+          equityFailures.push({ companyName, detail });
+          errors.push(`Venture ${code}: ${detail}`);
+        }
+      }
+
+      if (equityOk) {
+        equitySumBalancedCount++;
+      }
+
+      // Check 4: Inventory Consistency (unitsAvail - unitsSold == endingInv)
+      if (Math.abs(unitsAvail - unitsSold - endingInv) <= 1 && unitsAvail >= 0 && unitsSold >= 0 && endingInv >= 0) {
+        inventoryConsistentCount++;
+      } else {
+        const detail = `Inventory mismatch: ${unitsAvail} avail - ${unitsSold} sold != ${endingInv} ending.`;
+        inventoryFailures.push({ companyName, detail });
+        errors.push(`Venture ${code}: ${detail}`);
+      }
+
+      // Check 5: Valuation & Score Consistency
+      const valOk = Math.abs(enterpriseValue + cashValContribution - finalValuation) <= 0.10;
+      const expectedScore = finalValuation * (retainedEquity / 100);
+      const scoreOk = Math.abs(finalScore - expectedScore) <= 2.0; // allow integer rounding
+
+      if (valOk && scoreOk) {
+        valuationConsistentCount++;
+      } else {
+        const detail = `Valuation / score mismatch: EV ($${enterpriseValue.toFixed(2)}) + Cash Contribution ($${cashValContribution.toFixed(2)}) != Total ($${finalValuation.toFixed(2)}) or score ($${finalScore}) mismatch.`;
+        valuationFailures.push({ companyName, detail });
+        errors.push(`Venture ${code}: ${detail}`);
       }
     }
 
+    const checksList: Array<{
+      checkName: string;
+      passed: boolean;
+      description: string;
+      failedCompanies?: Array<{ companyName: string; detail: string }>;
+    }> = [
+      {
+        checkName: 'Cash Flow Continuity',
+        passed: cashFlowFailures.length === 0,
+        description: 'Verifies that starting cash + operating cash flows + financing cash flows equals ending cash reserve with zero ledger leakage.',
+        failedCompanies: cashFlowFailures,
+      },
+      {
+        checkName: 'Treasury Solvency',
+        passed: solvencyFailures.length === 0,
+        description: 'Verifies all ending cash balances remain nonnegative with zero unauthorized deficit spending or unbacked borrowing.',
+        failedCompanies: solvencyFailures,
+      },
+      {
+        checkName: 'Equity Conservation (100.0000%)',
+        passed: equityFailures.length === 0,
+        description: 'Verifies founder ownership bounds and guarantees that founder equity plus all active investor equity stakes strictly sum to 100.0000%.',
+        failedCompanies: equityFailures,
+      },
+      {
+        checkName: 'Inventory & Unit Balance',
+        passed: inventoryFailures.length === 0,
+        description: 'Verifies physical unit conservation: available units (beginning inventory + production) minus units sold equals ending warehouse inventory.',
+        failedCompanies: inventoryFailures,
+      },
+      {
+        checkName: 'Enterprise Valuation & Score',
+        passed: valuationFailures.length === 0,
+        description: 'Verifies company valuation identity (Enterprise Value + Cash Contribution) and equity-adjusted final score calculation.',
+        failedCompanies: valuationFailures,
+      },
+    ];
+
+    // Preserve boolean map on checks array for legacy test compatibility
+    const checksObj = {
+      cashFlowContinuity: cashFlowFailures.length === 0,
+      treasurySolvency: solvencyFailures.length === 0,
+      equityConservation: equityFailures.length === 0,
+      inventoryConsistency: inventoryFailures.length === 0,
+      valuationConsistency: valuationFailures.length === 0,
+    };
+    const checks = Object.assign(checksList, checksObj);
+
+    const summary = {
+      cashFlowBalancedCount,
+      solvencyPassedCount,
+      equitySumBalancedCount,
+      inventoryConsistentCount,
+      valuationConsistentCount,
+    };
+
+    const totalCompanies = (snapshots || []).length;
+    const isReconciled = checks.every(c => c.passed) && errors.length === 0;
+
     return {
-      isReconciled: errors.length === 0,
-      totalCompaniesChecked: (snapshots || []).length,
+      isReconciled,
+      totalCompaniesChecked: totalCompanies,
+      summary,
       checks,
       errors,
     };
@@ -818,47 +1034,80 @@ export class TournamentService {
       const startingCash = prevCashMap.get(snap.team_id) ?? 1000000;
 
       return {
+        // Primary Identifiers
         id: snap.id,
         teamId: snap.team_id,
+        team_id: snap.team_id,
+        company_id: snap.team_id,
         teamCode: teamObj?.team_code || 'UNK',
         companyName: teamObj?.company_name || 'Venture',
+        company_name: teamObj?.company_name || 'Venture',
         domainCode: teamObj?.domains?.code || 'TECH',
+        domain_code: teamObj?.domains?.code || 'TECH',
         domainName: teamObj?.domains?.name || 'Technology',
+        domain_name: teamObj?.domains?.name || 'Technology',
         tableStation: teamObj?.table_station,
+        table_station: teamObj?.table_station,
+
+        // Financial Cash Flows & Balances
         startingCash,
-        // Spending decisions
+        cash_starting: startingCash,
+        endingCash: Number(snap.ending_cash),
+        cash_ending: Number(snap.ending_cash),
+        grossRevenue: Number(snap.gross_revenue),
+        gross_revenue: Number(snap.gross_revenue),
+        cogs: Number(snap.cogs),
+        grossProfit: Number(snap.gross_profit),
+        operatingExpenses: Number(snap.operating_expenses),
+        opex: Number(snap.operating_expenses),
+        ebitda: Number(snap.ebitda),
+        taxExpense: Number(snap.tax_expense),
+        netIncome: Number(snap.net_income),
+        net_income: Number(snap.net_income),
+        operatingCashFlow: Number(snap.operating_cash_flow),
+        financingCashFlow: Number(snap.financing_cash_flow),
+
+        // Operational Metrics
+        productQualityIndex: Number(snap.product_quality_index),
+        product_quality: Number(snap.product_quality_index),
+        brandEquityScore: Number(snap.brand_equity_score),
+        attractivenessScore: Number(snap.attractiveness_score),
+        marketSharePct: Number(snap.market_share_pct),
+        market_share: Number(snap.market_share_pct),
+        unitsSold: Number(snap.units_sold),
+        endingInventory: Number(snap.ending_inventory),
+        inventory_units: Number(snap.ending_inventory),
+
+        // Valuation & Rankings
+        enterpriseValue: Number(snap.enterprise_value),
+        enterprise_value: Number(snap.enterprise_value),
+        cashValuationContribution: Number(snap.cash_valuation_contribution),
+        companyValuation: Number(snap.company_valuation),
+        company_valuation: Number(snap.company_valuation),
+        retainedEquityPct: Number(snap.retained_equity_pct),
+        ownership_percentage: Number(snap.retained_equity_pct),
+        equityAdjustedScore: Number(snap.equity_adjusted_score),
+        final_score: Number(snap.equity_adjusted_score),
+        domainRank: snap.domain_rank,
+        domain_rank: snap.domain_rank,
+        tournamentRank: snap.tournament_rank,
+        tournament_rank: snap.tournament_rank,
+
+        // Decisions
         marketingBudget: Number(dec?.marketing_budget || 0),
         rdBudget: Number(dec?.rd_budget || 0),
         operationsBudget: Number(dec?.operations_budget || 0),
         productionUnits: Number(dec?.production_units || 0),
         unitPrice: Number(dec?.unit_price || 0),
         investmentDecision: dec?.investment_decision || 'none',
-        // Operational performance
-        productQualityIndex: Number(snap.product_quality_index),
-        brandEquityScore: Number(snap.brand_equity_score),
-        attractivenessScore: Number(snap.attractiveness_score),
-        marketSharePct: Number(snap.market_share_pct),
-        unitsSold: Number(snap.units_sold),
-        endingInventory: Number(snap.ending_inventory),
-        // Financials
-        grossRevenue: Number(snap.gross_revenue),
-        cogs: Number(snap.cogs),
-        grossProfit: Number(snap.gross_profit),
-        operatingExpenses: Number(snap.operating_expenses),
-        ebitda: Number(snap.ebitda),
-        taxExpense: Number(snap.tax_expense),
-        netIncome: Number(snap.net_income),
-        operatingCashFlow: Number(snap.operating_cash_flow),
-        financingCashFlow: Number(snap.financing_cash_flow),
-        endingCash: Number(snap.ending_cash),
-        // Valuation & ranking
-        enterpriseValue: Number(snap.enterprise_value),
-        cashValuationContribution: Number(snap.cash_valuation_contribution),
-        companyValuation: Number(snap.company_valuation),
-        retainedEquityPct: Number(snap.retained_equity_pct),
-        equityAdjustedScore: Number(snap.equity_adjusted_score),
-        domainRank: snap.domain_rank,
-        tournamentRank: snap.tournament_rank,
+        decisions: {
+          marketing_budget: Number(dec?.marketing_budget || 0),
+          rd_budget: Number(dec?.rd_budget || 0),
+          operations_budget: Number(dec?.operations_budget || 0),
+          production_units: Number(dec?.production_units || 0),
+          unit_price: Number(dec?.unit_price || 0),
+          investment_decision: dec?.investment_decision || 'none',
+        },
       };
     });
 
@@ -868,16 +1117,31 @@ export class TournamentService {
     return {
       round: {
         id: round.id,
+        round_number: round.round_number,
         roundNumber: round.round_number,
         type: round.type,
         status: round.status,
+        event_id: round.event_id,
+        eventId: round.event_id,
         openedAt: round.opened_at,
         lockedAt: round.locked_at,
         simulatedAt: round.simulated_at,
         publishedAt: round.published_at,
         eventName: eventObj?.name || 'Capital Quest Competition',
       },
+      event: {
+        id: round.event_id,
+        name: eventObj?.name || 'Capital Quest Competition',
+      },
+      run: latestRun ? {
+        id: latestRun.id,
+        run_number: latestRun.run_version,
+        status: latestRun.status,
+        input_hash: latestRun.input_state_hash,
+        created_at: latestRun.created_at,
+      } : null,
       latestRun: latestRun || null,
+      snapshots: companyResults,
       results: companyResults,
       reconciliation,
     };

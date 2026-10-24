@@ -10,7 +10,8 @@ export interface OrganizerPolicyGates {
   cashValuationPolicyApproved: boolean;
   corporateTaxationApproved: boolean;
   standardVCOffersApproved: boolean;
-  proRataScalingApproved: boolean;
+  strictSpendingRejectionApproved: boolean;
+  proRataScalingApproved?: boolean; // Reconciled legacy identifier preserved for audit compatibility
   approvedBy?: string;
   approvedAt?: string;
 }
@@ -32,6 +33,7 @@ export function getOrganizerPolicyGates(eventId: string): OrganizerPolicyGates {
     cashValuationPolicyApproved: false,
     corporateTaxationApproved: false,
     standardVCOffersApproved: false,
+    strictSpendingRejectionApproved: false,
     proRataScalingApproved: false,
   };
 }
@@ -44,9 +46,14 @@ export function recordOrganizerApproval(
   approval: Partial<OrganizerPolicyGates> & { approvedBy: string }
 ): OrganizerPolicyGates {
   const current = getOrganizerPolicyGates(eventId);
+  const spendingApproved =
+    approval.strictSpendingRejectionApproved ?? approval.proRataScalingApproved ?? current.strictSpendingRejectionApproved;
+
   const updated: OrganizerPolicyGates = {
     ...current,
     ...approval,
+    strictSpendingRejectionApproved: spendingApproved,
+    proRataScalingApproved: spendingApproved,
     approvedBy: approval.approvedBy,
     approvedAt: new Date().toISOString(),
   };
@@ -75,8 +82,8 @@ export function assertOrganizerPoliciesApproved(eventId: string): {
   if (!gates.standardVCOffersApproved) {
     pendingPolicies.push('Standardized Uniform VC Offers Policy (R2 Seed and R4 Series A parameters)');
   }
-  if (!gates.proRataScalingApproved) {
-    pendingPolicies.push('Pro-Rata Spending Scaling for Minor Cash Deficits (<5%)');
+  if (!gates.strictSpendingRejectionApproved && !gates.proRataScalingApproved) {
+    pendingPolicies.push('Strict Spending Solvency Policy (Rejection of overspending decisions with zero auto-scaling)');
   }
 
   return {

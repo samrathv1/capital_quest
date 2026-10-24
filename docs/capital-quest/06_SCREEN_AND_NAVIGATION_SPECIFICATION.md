@@ -129,7 +129,7 @@ graph TD
 |  6. Investment Decision:       ( ) Offer A   (X) Offer B   ( ) Reject Both                         |
 +----------------------------------------------------------------------------------------------------+
 |  TOTAL PLANNED OUTFLOW:  $ 1,191,200.00   >>> ERROR: EXCEEDS AVAILABLE CASH BY $304,400.00 <<<    |
-|  [F2: Clear]   [F8: Auto-Scale R&D/Mkt]   [F9: Flag Slip for Review]   [Enter: SUBMIT & NEXT SLIP] |
+|  [F2: Clear]   [Strict Solvency: Rejection of Overspending]   [F9: Flag Slip]   [Enter: SUBMIT]    |
 +----------------------------------------------------------------------------------------------------+
 ```
 
@@ -137,7 +137,7 @@ graph TD
 1. **NumPad Hotkeys:**
    - `Enter` / `Tab`: Moves focus to next field.
    - `Shift + Tab`: Moves focus to previous field.
-   - `F8`: Automatically scales down marketing and R&D budgets pro-rata to fit within available cash.
+   - `F8`: *(Obsolete / Disabled in MVP)* Automatic spending modification is disabled per MVP tournament rules. Planned outflows exceeding available cash are strictly rejected, requiring an authorized corrected decision sheet.
    - `F9`: Flags slip as "Illegible / Disputed" and opens coordinator ticket.
    - `Ctrl + Enter`: Commits valid slip and immediately resets form with cursor focused on Team Code input for the next slip.
 2. **Dual-Key Verification Mode:**
