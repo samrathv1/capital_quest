@@ -848,7 +848,15 @@ function SimulationResultsContent() {
               </div>
             )}
 
-            <div className="flex justify-end pt-2">
+            <div className="flex justify-between items-center pt-2 border-t border-slate-800">
+              <Link
+                href={`/companies/${selectedCompany.company_id}`}
+                target="_blank"
+                className="inline-flex items-center gap-1.5 text-xs text-sky-400 hover:text-sky-300 font-medium"
+              >
+                <span>View Full Performance Dossier & Reports</span>
+                <ChevronRight className="h-3.5 w-3.5" />
+              </Link>
               <Button variant="outline" size="sm" onClick={() => setSelectedCompany(null)}>
                 Close
               </Button>

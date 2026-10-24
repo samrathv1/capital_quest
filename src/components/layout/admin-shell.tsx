@@ -16,6 +16,7 @@ import {
   ChevronRight,
   Sliders,
   PlayCircle,
+  Trophy,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -98,6 +99,12 @@ export function AdminShell({
       href: '/volunteer/verify',
       icon: ShieldAlert,
       roles: ['super_admin', 'domain_coordinator', 'volunteer'],
+    },
+    {
+      title: 'Public Leaderboard',
+      href: '/leaderboard',
+      icon: Trophy,
+      roles: ['super_admin', 'judge', 'domain_coordinator', 'volunteer'],
     },
   ];
 

@@ -726,10 +726,18 @@ describe('CAPITAL QUEST — Phase 4: Simulation Orchestration & Multi-Round Mana
       expect(approvedStatus.approved).toBe(true);
       expect(approvedStatus.pendingPolicies.length).toBe(0);
 
-      // 4. Backward compatibility: legacy proRataScalingApproved safely maps to strict spending approval
-      const gates = getOrganizerPolicyGates(eventId);
-      expect(gates.strictSpendingRejectionApproved).toBe(true);
-      expect(gates.proRataScalingApproved).toBe(true);
+      // 4. Verify legacy proRataScalingApproved alone does NOT satisfy strict spending solvency
+      const isolatedEventId = 'test-isolated-legacy-event';
+      recordOrganizerApproval(isolatedEventId, {
+        cashValuationPolicyApproved: true,
+        corporateTaxationApproved: true,
+        standardVCOffersApproved: true,
+        proRataScalingApproved: true, // Legacy approval without explicit strictSpendingRejectionApproved
+        approvedBy: 'Legacy Admin',
+      });
+      const legacyCheck = assertOrganizerPoliciesApproved(isolatedEventId);
+      expect(legacyCheck.approved).toBe(false);
+      expect(legacyCheck.pendingPolicies.some((p) => p.includes('Strict Spending Solvency Policy'))).toBe(true);
     });
 
     it('executes a 5-round development tournament with verified continuity, compounding dilution, and reconciliation', () => {

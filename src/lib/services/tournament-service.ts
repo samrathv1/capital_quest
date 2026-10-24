@@ -639,49 +639,542 @@ export class TournamentService {
     };
   }
 
-  // 4. LEADERBOARD & SNAPSHOTS
-  async getLeaderboard(eventId: string, roundNumber?: number, domainId?: string) {
-    let query = this.supabase
+  // 4. LEADERBOARD & SNAPSHOTS (ENHANCED FOR PHASE 5)
+  async getPublicLeaderboard(params: {
+    eventId?: string;
+    roundNumber?: number;
+    domainId?: string;
+  }) {
+    // 1. Resolve event
+    let eventId = params.eventId;
+    let event: { id: string; name: string; status: string; active_round_number: number } | null = null;
+    if (!eventId) {
+      const activeEvent = await this.getActiveEvent();
+      if (!activeEvent) {
+        return {
+          event: null,
+          hasPublishedRounds: false,
+          publishedRounds: [],
+          activeRoundNumber: 0,
+          selectedRoundNumber: null,
+          lastUpdated: null,
+          leaderboard: [],
+        };
+      }
+      eventId = activeEvent.id;
+      event = activeEvent;
+    } else {
+      const { data: eventData, error: eventErr } = await this.supabase
+        .from('events')
+        .select('id, name, status, active_round_number')
+        .eq('id', eventId)
+        .single();
+      if (eventErr || !eventData) {
+        throw new AppError('NOT_FOUND', `Tournament event not found: ${eventId}`, 404);
+      }
+      event = eventData;
+    }
+
+    if (!event) {
+      throw new AppError('NOT_FOUND', 'Tournament event could not be resolved', 404);
+    }
+
+    // 2. Query published rounds for this event
+    const { data: publishedRounds, error: roundsError } = await this.supabase
+      .from('rounds')
+      .select('id, round_number, status, published_at')
+      .eq('event_id', eventId)
+      .eq('status', 'published')
+      .order('round_number', { ascending: true });
+
+    if (roundsError) {
+      throw new AppError('NOT_FOUND', `Failed to load published rounds: ${roundsError.message}`, 500);
+    }
+
+    if (!publishedRounds || publishedRounds.length === 0) {
+      return {
+        event: {
+          id: event.id,
+          name: event.name,
+          status: event.status,
+        },
+        hasPublishedRounds: false,
+        publishedRounds: [],
+        activeRoundNumber: event.active_round_number ?? 0,
+        selectedRoundNumber: null,
+        lastUpdated: null,
+        leaderboard: [],
+      };
+    }
+
+    // 3. Determine selected round
+    let selectedRound: { id: string; round_number: number; status: string; published_at: string | null };
+    if (params.roundNumber !== undefined) {
+      const found = publishedRounds.find(r => r.round_number === params.roundNumber);
+      if (!found) {
+        throw new AppError('NOT_FOUND', `Round ${params.roundNumber} is not published yet.`, 404);
+      }
+      selectedRound = found;
+    } else {
+      selectedRound = publishedRounds[publishedRounds.length - 1];
+    }
+
+    // 4. Identify immediately prior published round (if any) to calculate rank movement
+    const selectedIndex = publishedRounds.findIndex(r => r.id === selectedRound.id);
+    const priorRound = selectedIndex > 0 ? publishedRounds[selectedIndex - 1] : null;
+
+    const priorRankMap = new Map<string, { tournamentRank: number; domainRank: number }>();
+    if (priorRound) {
+      const { data: priorSnapshots } = await this.supabase
+        .from('company_snapshots')
+        .select('team_id, tournament_rank, domain_rank')
+        .eq('round_id', priorRound.id)
+        .eq('is_active', true);
+
+      if (priorSnapshots) {
+        for (const ps of priorSnapshots) {
+          priorRankMap.set(ps.team_id, {
+            tournamentRank: Number(ps.tournament_rank),
+            domainRank: Number(ps.domain_rank),
+          });
+        }
+      }
+    }
+
+    // 5. Query active published snapshots for the selected round
+    let snapshotQuery = this.supabase
       .from('company_snapshots')
-      .select('*, teams(id, team_code, company_name, domain_id, domains(code, name)), rounds!inner(round_number, status, event_id)')
+      .select(`
+        id,
+        round_id,
+        team_id,
+        product_quality_index,
+        brand_equity_score,
+        market_share_pct,
+        gross_revenue,
+        cogs,
+        gross_profit,
+        operating_expenses,
+        inventory_holding_cost,
+        ebitda,
+        net_income,
+        ending_cash,
+        enterprise_value,
+        company_valuation,
+        retained_equity_pct,
+        equity_adjusted_score,
+        domain_rank,
+        tournament_rank,
+        teams!inner(
+          id,
+          team_code,
+          company_name,
+          table_station,
+          domain_id,
+          domains!inner(id, code, name)
+        ),
+        rounds!inner(round_number, status, published_at)
+      `)
+      .eq('round_id', selectedRound.id)
       .eq('is_active', true)
-      .eq('rounds.event_id', eventId);
+      .eq('rounds.status', 'published');
 
-    if (roundNumber !== undefined) {
-      query = query.eq('rounds.round_number', roundNumber);
-    }
-    if (domainId) {
-      query = query.eq('teams.domain_id', domainId);
+    if (params.domainId) {
+      snapshotQuery = snapshotQuery.eq('teams.domain_id', params.domainId);
     }
 
-    const { data, error } = await query.order('equity_adjusted_score', { ascending: false });
-
-    if (error) {
-      throw new AppError('NOT_FOUND', `Failed to query leaderboard: ${error.message}`, 500);
+    const { data: snapshots, error: snapError } = await snapshotQuery;
+    if (snapError) {
+      throw new AppError('NOT_FOUND', `Failed to query leaderboard snapshots: ${snapError.message}`, 500);
     }
 
-    return (data || []).map((row, index) => {
+    // 6. Deterministic 5-level tie-breaker sort:
+    // 1. finalScore DESC (equity_adjusted_score)
+    // 2. valuation DESC (company_valuation)
+    // 3. grossRevenue DESC
+    // 4. endingCash DESC
+    // 5. teamId ASC (alphabetical)
+    const sortedSnapshots = [...(snapshots || [])].sort((a, b) => {
+      const scoreDiff = Number(b.equity_adjusted_score) - Number(a.equity_adjusted_score);
+      if (scoreDiff !== 0) return scoreDiff;
+
+      const valDiff = Number(b.company_valuation) - Number(a.company_valuation);
+      if (valDiff !== 0) return valDiff;
+
+      const revDiff = Number(b.gross_revenue) - Number(a.gross_revenue);
+      if (revDiff !== 0) return revDiff;
+
+      const cashDiff = Number(b.ending_cash) - Number(a.ending_cash);
+      if (cashDiff !== 0) return cashDiff;
+
+      return String(a.team_id).localeCompare(String(b.team_id));
+    });
+
+    // 7. Format entries with rank and movement
+    const isDomainFiltered = Boolean(params.domainId);
+    const leaderboard = sortedSnapshots.map((row) => {
       const teamObj = row.teams as unknown as {
-        team_code?: string;
-        company_name?: string;
-        domains?: { name?: string; code?: string };
-      } | null;
+        id: string;
+        team_code: string;
+        company_name: string;
+        table_station?: string;
+        domain_id: string;
+        domains?: { id: string; code: string; name: string };
+      };
+
+      const tournamentRank = Number(row.tournament_rank);
+      const domainRank = Number(row.domain_rank);
+
+      // Current display rank: in domain view, domainRank; in global view, tournamentRank
+      const currentRank = isDomainFiltered ? domainRank : tournamentRank;
+
+      const priorInfo = priorRankMap.get(row.team_id);
+      let previousRank: number | null = null;
+      let rankMovement: number | null = null;
+
+      if (priorInfo) {
+        previousRank = isDomainFiltered ? priorInfo.domainRank : priorInfo.tournamentRank;
+        rankMovement = previousRank - currentRank;
+      }
 
       return {
-        rank: index + 1,
+        rank: currentRank,
+        tournamentRank,
+        domainRank,
+        previousRank,
+        rankMovement,
         teamId: row.team_id,
+        companyId: row.team_id,
         teamCode: teamObj?.team_code ?? 'UNKNOWN',
-        companyName: teamObj?.company_name ?? 'Virtual Company',
-        domainName: teamObj?.domains?.name ?? 'CleanTech',
+        companyName: teamObj?.company_name ?? 'Virtual Enterprise',
+        tableStation: teamObj?.table_station ?? null,
+        domainId: teamObj?.domain_id,
         domainCode: teamObj?.domains?.code ?? 'CLEANTECH',
+        domainName: teamObj?.domains?.name ?? 'CleanTech',
         valuation: Number(row.company_valuation),
         retainedEquityPct: Number(row.retained_equity_pct),
         equityAdjustedScore: Number(row.equity_adjusted_score),
+        finalScore: Number(row.equity_adjusted_score),
         endingCash: Number(row.ending_cash),
         grossRevenue: Number(row.gross_revenue),
         netIncome: Number(row.net_income),
+        ebitda: Number(row.ebitda),
+        cogs: Number(row.cogs),
+        operatingExpenses: Number(row.operating_expenses),
+        marketSharePct: Number(row.market_share_pct),
+        productQualityIndex: Number(row.product_quality_index),
+        brandEquityScore: Number(row.brand_equity_score),
       };
     });
+
+    return {
+      event: {
+        id: event.id,
+        name: event.name,
+        status: event.status,
+      },
+      hasPublishedRounds: true,
+      publishedRounds: publishedRounds.map(r => ({
+        roundNumber: r.round_number,
+        publishedAt: r.published_at,
+      })),
+      activeRoundNumber: event.active_round_number ?? 0,
+      selectedRoundNumber: selectedRound.round_number,
+      lastUpdated: selectedRound.published_at,
+      leaderboard,
+    };
+  }
+
+  // Backward compatible leaderboard getter
+  async getLeaderboard(eventId: string, roundNumber?: number, domainId?: string) {
+    const result = await this.getPublicLeaderboard({ eventId, roundNumber, domainId });
+    return result.leaderboard;
+  }
+
+  // 4c. COMPANY PERFORMANCE & FINANCIAL REPORTS (PHASE 5)
+  async getCompanyPerformance(companyId: string) {
+    // 1. Resolve company by UUID id or team_code
+    let teamQuery = this.supabase
+      .from('teams')
+      .select('*, events(id, name, status, starting_capital, starting_valuation), domains(*)')
+      .limit(1);
+
+    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(companyId);
+    if (isUUID) {
+      teamQuery = teamQuery.eq('id', companyId);
+    } else {
+      teamQuery = teamQuery.eq('team_code', companyId);
+    }
+
+    const { data: teamData, error: teamErr } = await teamQuery.maybeSingle();
+    if (teamErr || !teamData) {
+      throw new AppError('NOT_FOUND', `Company not found: ${companyId}`, 404);
+    }
+
+    const team = teamData;
+    const event = team.events as { id: string; name: string; status: string; starting_capital?: number; starting_valuation?: number } | null;
+    const domain = team.domains as { id: string; code: string; name: string } | null;
+
+    // 2. Fetch all published rounds for this event
+    const { data: publishedRounds, error: roundsErr } = await this.supabase
+      .from('rounds')
+      .select('id, round_number, status, type, published_at')
+      .eq('event_id', team.event_id)
+      .eq('status', 'published')
+      .order('round_number', { ascending: true });
+
+    if (roundsErr) {
+      throw new AppError('NOT_FOUND', `Failed to load published rounds: ${roundsErr.message}`, 500);
+    }
+
+    if (!publishedRounds || publishedRounds.length === 0) {
+      return {
+        company: {
+          id: team.id,
+          teamCode: team.team_code,
+          companyName: team.company_name,
+          tableStation: team.table_station,
+          domainId: team.domain_id,
+          domainName: domain?.name ?? 'CleanTech',
+          domainCode: domain?.code ?? 'CLEANTECH',
+          eventId: team.event_id,
+          eventName: event?.name ?? 'Capital Quest',
+        },
+        hasPublishedRounds: false,
+        publishedRounds: [],
+        latestSnapshot: null,
+        history: [],
+        roundComparisons: [],
+        capTable: [],
+        financialStatements: {
+          incomeStatement: [],
+          cashFlow: [],
+          valuation: [],
+        },
+        ledgerEntries: [],
+      };
+    }
+
+    // 3. Fetch active snapshots for this team across published rounds
+    const { data: snapshotsData, error: snapErr } = await this.supabase
+      .from('company_snapshots')
+      .select(`
+        *,
+        rounds!inner(id, round_number, status, type, published_at)
+      `)
+      .eq('team_id', team.id)
+      .eq('is_active', true)
+      .eq('rounds.status', 'published')
+      .order('rounds(round_number)', { ascending: true });
+
+    if (snapErr) {
+      throw new AppError('NOT_FOUND', `Failed to load company snapshots: ${snapErr.message}`, 500);
+    }
+
+    const snapshots = snapshotsData || [];
+
+    // 4. Fetch equity transactions for published rounds
+    const { data: equityData } = await this.supabase
+      .from('equity_transactions')
+      .select(`
+        *,
+        rounds!inner(id, round_number, status, type, published_at)
+      `)
+      .eq('team_id', team.id)
+      .eq('is_voided', false)
+      .eq('rounds.status', 'published')
+      .order('rounds(round_number)', { ascending: true });
+
+    // 5. Fetch financial ledger for published rounds
+    const { data: ledgerData } = await this.supabase
+      .from('financial_ledger')
+      .select(`
+        *,
+        rounds!inner(id, round_number, status)
+      `)
+      .eq('team_id', team.id)
+      .eq('is_voided', false)
+      .eq('rounds.status', 'published')
+      .order('created_at', { ascending: true });
+
+    // 6. Build Round History & Statements
+    const initialCapital = Number(event?.starting_capital ?? 1000000);
+    const initialValuation = Number(event?.starting_valuation ?? 200000);
+
+    const history = snapshots.map((s, idx) => {
+      const roundObj = s.rounds as { round_number?: number; type?: string; published_at?: string } | null;
+      const roundNum = roundObj?.round_number ?? idx + 1;
+      const startingCash = idx === 0 ? initialCapital : Number(snapshots[idx - 1].ending_cash);
+
+      return {
+        roundNumber: roundNum,
+        roundType: roundObj?.type ?? 'regular',
+        publishedAt: roundObj?.published_at ?? null,
+        startingCash,
+        grossRevenue: Number(s.gross_revenue),
+        cogs: Number(s.cogs),
+        grossProfit: Number(s.gross_profit),
+        operatingExpenses: Number(s.operating_expenses),
+        inventoryHoldingCost: Number(s.inventory_holding_cost),
+        ebitda: Number(s.ebitda),
+        taxExpense: Number(s.tax_expense),
+        netIncome: Number(s.net_income),
+        operatingCashFlow: Number(s.operating_cash_flow),
+        financingCashFlow: Number(s.financing_cash_flow),
+        endingCash: Number(s.ending_cash),
+        productQualityIndex: Number(s.product_quality_index),
+        brandEquityScore: Number(s.brand_equity_score),
+        marketSharePct: Number(s.market_share_pct),
+        potentialDemand: Number(s.potential_demand),
+        unitsAvailable: Number(s.units_available),
+        unitsSold: Number(s.units_sold),
+        unitsStockout: Number(s.units_stockout),
+        endingInventory: Number(s.ending_inventory),
+        enterpriseValue: Number(s.enterprise_value),
+        cashValuationContribution: Number(s.cash_valuation_contribution),
+        companyValuation: Number(s.company_valuation),
+        retainedEquityPct: Number(s.retained_equity_pct),
+        equityAdjustedScore: Number(s.equity_adjusted_score),
+        domainRank: Number(s.domain_rank),
+        tournamentRank: Number(s.tournament_rank),
+      };
+    });
+
+    // 7. Calculate Round-by-Round Comparisons (Handling baseline = 0 gracefully)
+    const roundComparisons = history.map((curr, idx) => {
+      if (idx === 0) {
+        // Compare with Round 0 baseline
+        const valDelta = curr.companyValuation - initialValuation;
+        const valPct = initialValuation > 0 ? (valDelta / initialValuation) * 100 : null;
+
+        return {
+          roundNumber: curr.roundNumber,
+          revenueDelta: curr.grossRevenue,
+          revenueGrowthPct: null, // Zero baseline
+          profitDelta: curr.netIncome,
+          valuationDelta: valDelta,
+          valuationGrowthPct: valPct,
+          equityDelta: curr.retainedEquityPct - 100,
+          marketShareDelta: curr.marketSharePct,
+          domainRankDelta: 0,
+          tournamentRankDelta: 0,
+          financingInflow: curr.financingCashFlow,
+        };
+      }
+
+      const prev = history[idx - 1];
+      const revDelta = curr.grossRevenue - prev.grossRevenue;
+      const revPct = prev.grossRevenue > 0 ? (revDelta / prev.grossRevenue) * 100 : null;
+
+      const profitDelta = curr.netIncome - prev.netIncome;
+
+      const valDelta = curr.companyValuation - prev.companyValuation;
+      const valPct = prev.companyValuation > 0 ? (valDelta / prev.companyValuation) * 100 : null;
+
+      const equityDelta = curr.retainedEquityPct - prev.retainedEquityPct;
+      const marketShareDelta = curr.marketSharePct - prev.marketSharePct;
+
+      const domainRankDelta = prev.domainRank - curr.domainRank;
+      const tournamentRankDelta = prev.tournamentRank - curr.tournamentRank;
+
+      return {
+        roundNumber: curr.roundNumber,
+        revenueDelta: revDelta,
+        revenueGrowthPct: revPct,
+        profitDelta,
+        valuationDelta: valDelta,
+        valuationGrowthPct: valPct,
+        equityDelta,
+        marketShareDelta,
+        domainRankDelta,
+        tournamentRankDelta,
+        financingInflow: curr.financingCashFlow,
+      };
+    });
+
+    // 8. Financial Statements breakdown
+    const incomeStatement = history.map(h => ({
+      roundNumber: h.roundNumber,
+      grossRevenue: h.grossRevenue,
+      cogs: h.cogs,
+      grossProfit: h.grossProfit,
+      operatingExpenses: h.operatingExpenses,
+      inventoryHoldingCost: h.inventoryHoldingCost,
+      ebitda: h.ebitda,
+      taxExpense: h.taxExpense,
+      netIncome: h.netIncome,
+    }));
+
+    const cashFlow = history.map(h => ({
+      roundNumber: h.roundNumber,
+      startingCash: h.startingCash,
+      operatingCashFlow: h.operatingCashFlow,
+      financingCashFlow: h.financingCashFlow,
+      netCashMovement: h.operatingCashFlow + h.financingCashFlow,
+      endingCash: h.endingCash,
+    }));
+
+    const valuation = history.map(h => ({
+      roundNumber: h.roundNumber,
+      enterpriseValue: h.enterpriseValue,
+      cashValuationContribution: h.cashValuationContribution,
+      companyValuation: h.companyValuation,
+      retainedEquityPct: h.retainedEquityPct,
+      equityAdjustedScore: h.equityAdjustedScore,
+      domainRank: h.domainRank,
+      tournamentRank: h.tournamentRank,
+    }));
+
+    // 9. Cap Table & Equity Transactions
+    const capTable = (equityData || []).map(eq => ({
+      id: eq.id,
+      roundNumber: (eq.rounds as { round_number?: number } | null)?.round_number,
+      roundType: (eq.rounds as { type?: string } | null)?.type,
+      shareholderName: eq.shareholder_name,
+      isFoundingTeam: eq.is_founding_team,
+      preRoundEquityPct: Number(eq.pre_round_equity_pct),
+      dilutionDeltaPct: Number(eq.dilution_delta_pct),
+      postRoundEquityPct: Number(eq.post_round_equity_pct),
+      investmentAmount: Number(eq.investment_amount),
+    }));
+
+    const latestSnapshot = history.length > 0 ? history[history.length - 1] : null;
+
+    return {
+      company: {
+        id: team.id,
+        teamCode: team.team_code,
+        companyName: team.company_name,
+        tableStation: team.table_station,
+        domainId: team.domain_id,
+        domainName: domain?.name ?? 'CleanTech',
+        domainCode: domain?.code ?? 'CLEANTECH',
+        eventId: team.event_id,
+        eventName: event?.name ?? 'Capital Quest',
+      },
+      hasPublishedRounds: true,
+      publishedRounds: publishedRounds.map(r => ({
+        roundNumber: r.round_number,
+        publishedAt: r.published_at,
+      })),
+      latestSnapshot,
+      history,
+      roundComparisons,
+      capTable,
+      financialStatements: {
+        incomeStatement,
+        cashFlow,
+        valuation,
+      },
+      ledgerEntries: (ledgerData || []).map(l => ({
+        id: l.id,
+        roundNumber: (l.rounds as { round_number?: number } | null)?.round_number,
+        entryType: l.entry_type,
+        amount: Number(l.amount),
+        runningBalance: Number(l.running_balance),
+        description: l.description,
+      })),
+    };
   }
 
   // 4b. FINANCIAL RECONCILIATION AUDIT
@@ -795,26 +1288,30 @@ export class TournamentService {
       const unitsSold = Number(snap.units_sold);
       const endingInv = Number(snap.ending_inventory);
 
-      // Check 1: Treasury Solvency (no unauthorized negative ending cash)
-      if (endingCash >= -0.01) {
+      // Check 1: Treasury Solvency (no negative ending cash, and no negative pre-clamp balance)
+      const expectedRawEndingCash = startingCash + ocf + fcf;
+      const isDeficit = expectedRawEndingCash < -0.01;
+      const isEndingNegative = endingCash < -0.01;
+
+      if (!isDeficit && !isEndingNegative) {
         solvencyPassedCount++;
       } else {
-        const detail = `Negative ending cash balance ($${endingCash.toFixed(2)}).`;
+        const detail = isDeficit
+          ? `Negative ending cash balance ($${endingCash.toFixed(2)}): Pre-clamp balance ($${expectedRawEndingCash.toFixed(2)}) incurred deficit. Zero-clamping cannot conceal insolvency.`
+          : `Negative ending cash balance ($${endingCash.toFixed(2)}).`;
         solvencyFailures.push({ companyName, detail });
         errors.push(`Venture ${code}: ${detail}`);
       }
 
       // Check 2: Cash Flow Continuity
-      // ending_cash = max(0, startingCash + OCF + FCF)
-      const expectedRawEndingCash = startingCash + ocf + fcf;
-      const expectedEndingCash = Math.max(0, expectedRawEndingCash);
-      let cashFlowOk = Math.abs(endingCash - expectedEndingCash) < 0.05;
+      // Ending cash must strictly equal startingCash + OCF + FCF without concealing negative pre-clamp balance
+      let cashFlowOk = Math.abs(endingCash - expectedRawEndingCash) < 0.05 && !isDeficit;
 
       // If ledger entries exist, verify ending cash matches ledger sum
       const ledgerNet = ledgerNetDeltaMap.get(snap.team_id);
       if (ledgerNet !== undefined) {
-        const expectedLedgerEnding = Math.max(0, startingCash + ledgerNet);
-        if (Math.abs(endingCash - expectedLedgerEnding) >= 0.05) {
+        const expectedLedgerEnding = startingCash + ledgerNet;
+        if (Math.abs(endingCash - expectedLedgerEnding) >= 0.05 || expectedLedgerEnding < -0.01) {
           cashFlowOk = false;
         }
       }
@@ -822,7 +1319,9 @@ export class TournamentService {
       if (cashFlowOk) {
         cashFlowBalancedCount++;
       } else {
-        const detail = `Cash mismatch: Beg ($${startingCash.toFixed(2)}) + OCF ($${ocf.toFixed(2)}) + FCF ($${fcf.toFixed(2)}) != End ($${endingCash.toFixed(2)}).`;
+        const detail = isDeficit
+          ? `Cash deficit leak: Pre-clamp balance ($${expectedRawEndingCash.toFixed(2)}) is negative. Beg ($${startingCash.toFixed(2)}) + OCF ($${ocf.toFixed(2)}) + FCF ($${fcf.toFixed(2)}) != End ($${endingCash.toFixed(2)}).`
+          : `Cash mismatch: Beg ($${startingCash.toFixed(2)}) + OCF ($${ocf.toFixed(2)}) + FCF ($${fcf.toFixed(2)}) != End ($${endingCash.toFixed(2)}).`;
         cashFlowFailures.push({ companyName, detail });
         errors.push(`Venture ${code}: ${detail}`);
       }

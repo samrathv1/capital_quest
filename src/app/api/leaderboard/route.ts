@@ -7,15 +7,11 @@ import { successResponse, errorResponse } from '@/lib/api-response';
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
-    const eventId = searchParams.get('eventId');
+    const eventIdParam = searchParams.get('eventId');
     const roundNumberStr = searchParams.get('roundNumber');
     const domainId = searchParams.get('domainId') || undefined;
 
-    if (!eventId) {
-      return errorResponse(new Error('Missing required query parameter: eventId'));
-    }
-
-    const roundNumber = roundNumberStr !== null ? parseInt(roundNumberStr, 10) : undefined;
+    const roundNumber = roundNumberStr !== null && roundNumberStr !== '' ? parseInt(roundNumberStr, 10) : undefined;
 
     let supabase;
     try {
@@ -25,14 +21,18 @@ export async function GET(req: NextRequest) {
     }
 
     const service = new TournamentService(supabase);
-    const leaderboard = await service.getLeaderboard(eventId, roundNumber, domainId);
+    const publicData = await service.getPublicLeaderboard({
+      eventId: eventIdParam || undefined,
+      roundNumber,
+      domainId,
+    });
 
     return successResponse(
       {
-        eventId,
-        roundNumber,
+        eventId: publicData.event?.id,
+        roundNumber: publicData.selectedRoundNumber,
         domainId,
-        leaderboard,
+        ...publicData,
       },
       200,
       {

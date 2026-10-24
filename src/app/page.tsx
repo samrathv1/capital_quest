@@ -35,8 +35,16 @@ export default function HomePage() {
           </div>
         </div>
 
-        {/* OPERATIONAL PORTALS (PHASE 3) */}
+        {/* OPERATIONAL & PUBLIC PORTALS */}
         <div className="flex flex-wrap items-center justify-center gap-3 pt-4">
+          <a
+            href="/leaderboard"
+            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm shadow-lg shadow-amber-950/40 transition-all border border-amber-400"
+          >
+            <span>🏆 Public Leaderboard</span>
+            <span>→</span>
+          </a>
+
           <a
             href="/login"
             className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-sm shadow-lg shadow-indigo-900/40 transition-all border border-indigo-500/30"

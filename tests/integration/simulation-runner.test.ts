@@ -17,6 +17,7 @@ describe('Phase 2: Transactional Simulation Runner & Organizer Policy Gates', ()
     gates.cashValuationPolicyApproved = false;
     gates.corporateTaxationApproved = false;
     gates.standardVCOffersApproved = false;
+    gates.strictSpendingRejectionApproved = false;
     gates.proRataScalingApproved = false;
   });
 
@@ -72,7 +73,7 @@ describe('Phase 2: Transactional Simulation Runner & Organizer Policy Gates', ()
       cashValuationPolicyApproved: true,
       corporateTaxationApproved: true,
       standardVCOffersApproved: true,
-      proRataScalingApproved: true,
+      strictSpendingRejectionApproved: true,
       approvedBy: 'Director of Entrepreneurship Tournament',
     });
 
@@ -194,7 +195,7 @@ describe('Phase 2: Transactional Simulation Runner & Organizer Policy Gates', ()
       cashValuationPolicyApproved: true,
       corporateTaxationApproved: true,
       standardVCOffersApproved: true,
-      proRataScalingApproved: true,
+      strictSpendingRejectionApproved: true,
       approvedBy: 'Director',
     });
 
