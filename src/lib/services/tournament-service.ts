@@ -56,6 +56,63 @@ export class TournamentService {
     return data;
   }
 
+  async getActiveEvent() {
+    const { data, error } = await this.supabase
+      .from('events')
+      .select('*, domains(*), rounds(*)')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) throw new AppError('NOT_FOUND', `Failed to load active event: ${error.message}`, 500);
+    return data;
+  }
+
+  async getDomains(eventId: string) {
+    const { data, error } = await this.supabase
+      .from('domains')
+      .select('*')
+      .eq('event_id', eventId)
+      .order('code');
+
+    if (error) throw new AppError('NOT_FOUND', `Failed to load domains: ${error.message}`, 500);
+    return data;
+  }
+
+  async addTeamMember(input: {
+    teamId: string;
+    fullName: string;
+    email?: string;
+    studentId?: string;
+    roleTitle?: string;
+  }) {
+    const { data, error } = await this.supabase
+      .from('team_members')
+      .insert({
+        team_id: input.teamId,
+        full_name: input.fullName,
+        email: input.email || null,
+        student_id: input.studentId || null,
+        role_title: input.roleTitle || 'Co-Founder',
+      })
+      .select()
+      .single();
+
+    if (error) throw new AppError('VALIDATION_ERROR', `Failed to add team member: ${error.message}`, 400);
+    return data;
+  }
+
+  async getTeamMembers(teamId: string) {
+    const { data, error } = await this.supabase
+      .from('team_members')
+      .select('*')
+      .eq('team_id', teamId)
+      .order('created_at');
+
+    if (error) throw new AppError('NOT_FOUND', `Failed to load team members: ${error.message}`, 500);
+    return data;
+  }
+
   // 2. ROUND OPERATIONS
   async getRounds(eventId: string) {
     const { data, error } = await this.supabase
@@ -336,6 +393,133 @@ export class TournamentService {
     }
 
     return verified;
+  }
+
+  async getDecisions(roundId: string) {
+    const { data, error } = await this.supabase
+      .from('decisions')
+      .select('*, teams(id, team_code, company_name, table_station, domain_id, domains(code, name))')
+      .eq('round_id', roundId)
+      .order('created_at');
+
+    if (error) throw new AppError('NOT_FOUND', `Failed to load decisions: ${error.message}`, 500);
+    return data;
+  }
+
+  async getOverviewStats(eventId: string) {
+    const event = await this.supabase
+      .from('events')
+      .select('*, rounds(*)')
+      .eq('id', eventId)
+      .single();
+
+    const { count: teamCount } = await this.supabase
+      .from('teams')
+      .select('*', { count: 'exact', head: true })
+      .eq('event_id', eventId);
+
+    const { count: domainCount } = await this.supabase
+      .from('domains')
+      .select('*', { count: 'exact', head: true })
+      .eq('event_id', eventId);
+
+    const rounds = (event.data?.rounds || []) as Array<{ id: string; round_number: number; status: string }>;
+    rounds.sort((a, b) => a.round_number - b.round_number);
+
+    const activeRound = rounds.find(r => r.status === 'open' || r.status === 'locked' || r.status === 'simulated') 
+      || rounds.find(r => r.status === 'draft') 
+      || rounds[0] 
+      || null;
+
+    let submittedCount = 0;
+    let verifiedCount = 0;
+    let flaggedCount = 0;
+
+    if (activeRound) {
+      const { data: decisions } = await this.supabase
+        .from('decisions')
+        .select('status')
+        .eq('round_id', activeRound.id);
+
+      for (const d of decisions || []) {
+        if (d.status === 'entered') submittedCount++;
+        else if (d.status === 'verified' || d.status === 'locked') {
+          submittedCount++;
+          verifiedCount++;
+        } else if (d.status === 'flagged') {
+          flaggedCount++;
+        }
+      }
+    }
+
+    const totalTeams = teamCount || 0;
+    const missingCount = Math.max(0, totalTeams - submittedCount - flaggedCount);
+
+    return {
+      event: event.data,
+      totalTeams,
+      totalDomains: domainCount || 0,
+      activeRound,
+      submittedCount,
+      verifiedCount,
+      missingCount,
+      flaggedCount,
+      eventStatus: event.data?.status || 'setup',
+    };
+  }
+
+  async getDomainReadiness(roundId: string, domainId: string) {
+    const round = await this.getRoundById(roundId);
+
+    const { data: domainTeams, error: teamsError } = await this.supabase
+      .from('teams')
+      .select('id, team_code, company_name, table_station')
+      .eq('event_id', round.event_id)
+      .eq('domain_id', domainId)
+      .eq('is_disqualified', false);
+
+    if (teamsError) throw new AppError('NOT_FOUND', `Failed to load domain teams: ${teamsError.message}`, 500);
+
+    const { data: decisions, error: decError } = await this.supabase
+      .from('decisions')
+      .select('*')
+      .eq('round_id', roundId);
+
+    if (decError) throw new AppError('NOT_FOUND', `Failed to load decisions: ${decError.message}`, 500);
+
+    const decisionMap = new Map((decisions || []).map(d => [d.team_id, d]));
+
+    const teamsStatus = (domainTeams || []).map(team => {
+      const dec = decisionMap.get(team.id);
+      return {
+        teamId: team.id,
+        teamCode: team.team_code,
+        companyName: team.company_name,
+        tableStation: team.table_station,
+        status: dec ? dec.status : 'missing',
+        decision: dec || null,
+      };
+    });
+
+    const total = teamsStatus.length;
+    const verified = teamsStatus.filter(t => t.status === 'verified' || t.status === 'locked').length;
+    const entered = teamsStatus.filter(t => t.status === 'entered').length;
+    const flagged = teamsStatus.filter(t => t.status === 'flagged').length;
+    const missing = teamsStatus.filter(t => t.status === 'missing').length;
+
+    return {
+      domainId,
+      roundId,
+      roundNumber: round.round_number,
+      roundStatus: round.status,
+      totalTeams: total,
+      verifiedCount: verified,
+      enteredCount: entered,
+      flaggedCount: flagged,
+      missingCount: missing,
+      isReady: total > 0 && verified === total,
+      teams: teamsStatus,
+    };
   }
 
   // 4. LEADERBOARD & SNAPSHOTS

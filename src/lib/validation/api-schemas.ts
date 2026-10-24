@@ -40,7 +40,25 @@ export const OrganizerApprovalSchema = z.object({
   approvedBy: z.string().min(1, 'Approver name or ID required'),
 });
 
+export const TeamRegisterSchema = z.object({
+  eventId: z.string().uuid('Invalid eventId UUID format'),
+  domainId: z.string().uuid('Invalid domainId UUID format'),
+  teamCode: z.string().min(2, 'Team code must be at least 2 characters').max(10, 'Team code too long').trim().toUpperCase(),
+  companyName: z.string().min(2, 'Company name must be at least 2 characters').max(100, 'Company name too long').trim(),
+  tableStation: z.string().max(20).optional(),
+});
+
+export const TeamMemberSchema = z.object({
+  teamId: z.string().uuid('Invalid teamId UUID format'),
+  fullName: z.string().min(2, 'Full name required').max(100).trim(),
+  email: z.string().email('Invalid email address').optional().or(z.literal('')),
+  studentId: z.string().max(50).optional(),
+  roleTitle: z.string().max(50).default('Co-Founder'),
+});
+
 export type DecisionSubmitInput = z.infer<typeof DecisionSubmitSchema>;
 export type SimulateRoundInput = z.infer<typeof SimulateRoundSchema>;
 export type VoidRoundInput = z.infer<typeof VoidRoundSchema>;
 export type OrganizerApprovalInput = z.infer<typeof OrganizerApprovalSchema>;
+export type TeamRegisterInput = z.infer<typeof TeamRegisterSchema>;
+export type TeamMemberInput = z.infer<typeof TeamMemberSchema>;

@@ -35,6 +35,33 @@ export default function HomePage() {
           </div>
         </div>
 
+        {/* OPERATIONAL PORTALS (PHASE 3) */}
+        <div className="flex flex-wrap items-center justify-center gap-3 pt-4">
+          <a
+            href="/login"
+            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-sm shadow-lg shadow-indigo-900/40 transition-all border border-indigo-500/30"
+          >
+            <span>Staff Portal Login</span>
+            <span>→</span>
+          </a>
+
+          <a
+            href="/volunteer/entry"
+            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-sm shadow-lg shadow-emerald-900/40 transition-all border border-emerald-500/30"
+          >
+            <span>Volunteer 10-Key Console</span>
+            <span>→</span>
+          </a>
+
+          <a
+            href="/admin/dashboard"
+            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-sm transition-all border border-slate-700"
+          >
+            <span>Admin Command Center</span>
+            <span>→</span>
+          </a>
+        </div>
+
         <div className="pt-8 border-t border-slate-800/80 flex flex-wrap items-center justify-center gap-4 text-xs font-mono text-slate-500">
           <span>Engine: Next.js 15 App Router</span>
           <span>•</span>
@@ -42,7 +69,7 @@ export default function HomePage() {
           <span>•</span>
           <span>Math: Decimal.js (28-Precision)</span>
           <span>•</span>
-          <span>Testing: Vitest</span>
+          <span>Phase 3: Volunteer Console & Admin App Operational</span>
         </div>
       </div>
     </main>
