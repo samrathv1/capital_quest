@@ -13,6 +13,10 @@ export const DecisionSubmitSchema = z.object({
 
 export const DecisionVerifySchema = DecisionSubmitSchema;
 
+export const AdminDecisionConfirmSchema = DecisionSubmitSchema.extend({
+  adminNotes: z.string().max(500).optional(),
+});
+
 export const LockRoundSchema = z.object({
   overrideMissing: z.boolean().default(false),
 });
@@ -72,3 +76,4 @@ export type OrganizerApprovalInput = z.infer<typeof OrganizerApprovalSchema>;
 export type TeamRegisterInput = z.infer<typeof TeamRegisterSchema>;
 export type TeamMemberInput = z.infer<typeof TeamMemberSchema>;
 export type UpdatePresentationStateInput = z.infer<typeof UpdatePresentationStateSchema>;
+export type AdminDecisionConfirmInput = z.infer<typeof AdminDecisionConfirmSchema>;

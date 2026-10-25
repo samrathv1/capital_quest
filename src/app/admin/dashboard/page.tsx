@@ -301,15 +301,15 @@ export default function AdminDashboardPage() {
             </Card>
           </Link>
 
-          <Link href="/volunteer/entry" className="group">
+          <Link href="/admin/decisions" className="group">
             <Card className="h-full border-slate-800 group-hover:border-emerald-500/50 transition-all p-5">
               <div className="flex items-center justify-between">
                 <div className="space-y-1">
                   <div className="text-sm font-bold text-white group-hover:text-emerald-300 transition-colors">
-                    Volunteer 10-Key Console
+                    Admin Decision Console
                   </div>
                   <div className="text-xs text-slate-400">
-                    High-speed paper-sheet transcription with instant solvency and budget feedback.
+                    Single-operator decision entry with solvency enforcement and instant verification.
                   </div>
                 </div>
                 <ArrowRight className="h-5 w-5 text-slate-500 group-hover:text-emerald-400 transition-all group-hover:translate-x-1 shrink-0 ml-4" />

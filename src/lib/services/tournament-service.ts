@@ -1,6 +1,6 @@
 import { SupabaseClient } from '@supabase/supabase-js';
 import { AppError } from '@/lib/errors/app-error';
-import { DecisionSubmitInput, VoidRoundInput } from '@/lib/validation/api-schemas';
+import { DecisionSubmitInput, VoidRoundInput, AdminDecisionConfirmInput } from '@/lib/validation/api-schemas';
 import { D } from '@/engine/math/precision';
 import { assertOrganizerPoliciesApproved } from './organizer-approvals';
 
@@ -212,6 +212,23 @@ export class TournamentService {
         `Cannot lock round: ${missingTeams.length} teams have not submitted decisions. Set overrideMissing: true to apply default fallbacks.`,
         422,
         { missingTeams: missingTeams.map(t => t.team_code) }
+      );
+    }
+
+    const unverifiedTeams = (teams || []).filter(t => {
+      const dec = (decisions || []).find(d => d.team_id === t.id);
+      return !dec || (dec.status !== 'verified' && dec.status !== 'locked');
+    });
+
+    if (unverifiedTeams.length > 0 && !overrideMissing) {
+      throw new AppError(
+        'UNVERIFIED_SUBMISSIONS',
+        `Cannot lock round: ${unverifiedTeams.length} teams have unverified decisions. Every eligible team's decision must pass validation and verification before locking.`,
+        422,
+        {
+          unverifiedTeams: unverifiedTeams.map(t => t.team_code),
+          unverifiedCount: unverifiedTeams.length,
+        }
       );
     }
 
@@ -558,6 +575,295 @@ export class TournamentService {
     }
 
     return verified;
+  }
+
+  async adminConfirmDecision(input: AdminDecisionConfirmInput, adminId: string) {
+    // 1. Verify target round is open
+    const round = await this.getRoundById(input.roundId);
+    if (round.status !== 'open') {
+      throw new AppError('ROUND_NOT_OPEN', `Round is not open for decision entry. Current status: ${round.status}`);
+    }
+
+    // 2. Fetch team and domain rules
+    const { data: team, error: teamErr } = await this.supabase
+      .from('teams')
+      .select('id, event_id, domain_id, team_code, company_name, domains(*)')
+      .eq('id', input.teamId)
+      .single();
+
+    if (teamErr || !team) {
+      throw new AppError('NOT_FOUND', `Team not found: ${input.teamId}`, 404);
+    }
+
+    const domain = team.domains as unknown as {
+      base_unit_cogs: number;
+      benchmark_price: number;
+      min_allowed_price: number;
+      max_allowed_price: number;
+    } | null;
+
+    const minPrice = Number(domain?.min_allowed_price ?? 0);
+    const maxPrice = Number(domain?.max_allowed_price ?? 999999);
+    const baseUnitCogs = D(domain?.base_unit_cogs ?? 100);
+
+    // 3. Price validation within domain regulatory bounds
+    if (input.unitPrice < minPrice || input.unitPrice > maxPrice) {
+      throw new AppError(
+        'VALIDATION_ERROR',
+        `Unit price ($${input.unitPrice}) is outside allowed domain bounds ($${minPrice.toFixed(2)} - $${maxPrice.toFixed(2)}).`,
+        422,
+        { unitPrice: input.unitPrice, minPrice, maxPrice }
+      );
+    }
+
+    // 4. Investment option validation
+    const isInvestmentRound = round.round_number === 2 || round.round_number === 4;
+    if (!isInvestmentRound && input.investmentDecision !== 'none' && input.investmentDecision !== 'reject_both') {
+      throw new AppError(
+        'VALIDATION_ERROR',
+        `Investment choices are strictly restricted to Seed (Round 2) and Series A (Round 4). In Round ${round.round_number}, choice must be 'none' or 'reject_both'.`,
+        422
+      );
+    }
+
+    // 5. Fetch team's current available liquid cash
+    const roundEventData = round as { events?: { starting_capital?: number } };
+    let currentCash = D(roundEventData.events?.starting_capital ?? 1000000);
+    if (round.round_number > 1) {
+      const { data: prevRound } = await this.supabase
+        .from('rounds')
+        .select('id')
+        .eq('event_id', round.event_id)
+        .eq('round_number', round.round_number - 1)
+        .single();
+
+      if (prevRound) {
+        const { data: prevSnap } = await this.supabase
+          .from('company_snapshots')
+          .select('ending_cash')
+          .eq('round_id', prevRound.id)
+          .eq('team_id', input.teamId)
+          .eq('is_active', true)
+          .single();
+
+        if (prevSnap) {
+          currentCash = D(prevSnap.ending_cash);
+        }
+      }
+    }
+
+    // 6. Solvency check
+    const totalOutflow = D(input.marketingBudget)
+      .add(input.rdBudget)
+      .add(input.operationsBudget)
+      .add(D(input.productionUnits).mul(baseUnitCogs));
+
+    if (totalOutflow.gt(currentCash)) {
+      const deficit = totalOutflow.sub(currentCash);
+      throw new AppError(
+        'OVERSPENT_BUDGET',
+        `Planned cash outflow ($${totalOutflow.toFixed(2)}) exceeds available liquid cash ($${currentCash.toFixed(2)}) by $${deficit.toFixed(2)}. Overspending decisions are strictly rejected per tournament rules.`,
+        422,
+        {
+          availableCash: currentCash.toNumber(),
+          totalOutflow: totalOutflow.toNumber(),
+          deficit: deficit.toNumber(),
+        }
+      );
+    }
+
+    // 7. Check existing decision
+    const { data: existing } = await this.supabase
+      .from('decisions')
+      .select('*')
+      .eq('round_id', input.roundId)
+      .eq('team_id', input.teamId)
+      .maybeSingle();
+
+    if (existing && existing.status === 'locked') {
+      throw new AppError('DECISION_LOCKED', 'Decision is already locked and cannot be modified.', 422);
+    }
+
+    // 8. Upsert decision in verified status
+    const nowIso = new Date().toISOString();
+    const { data: decision, error: upsertErr } = await this.supabase
+      .from('decisions')
+      .upsert(
+        {
+          round_id: input.roundId,
+          team_id: input.teamId,
+          status: 'verified',
+          marketing_budget: input.marketingBudget,
+          rd_budget: input.rdBudget,
+          production_units: input.productionUnits,
+          unit_price: input.unitPrice,
+          operations_budget: input.operationsBudget,
+          investment_decision: input.investmentDecision,
+          entered_by: existing?.entered_by || adminId,
+          entered_at: existing?.entered_at || nowIso,
+          verified_by: adminId,
+          verified_at: nowIso,
+          admin_override_notes: input.adminNotes || 'Single-Admin validated & confirmed',
+          updated_at: nowIso,
+        },
+        { onConflict: 'round_id,team_id' }
+      )
+      .select()
+      .single();
+
+    if (upsertErr) {
+      throw new AppError('VALIDATION_ERROR', `Failed to confirm decision: ${upsertErr.message}`, 400);
+    }
+
+    // 9. Write audit log
+    await this.logAuditEvent({
+      actorId: adminId,
+      action: 'ADMIN_CONFIRM_DECISION',
+      entityName: 'decisions',
+      entityId: decision.id,
+      beforeState: existing ? { status: existing.status, values: existing } : undefined,
+      afterState: {
+        status: 'verified',
+        teamId: input.teamId,
+        roundId: input.roundId,
+        marketingBudget: input.marketingBudget,
+        rdBudget: input.rdBudget,
+        productionUnits: input.productionUnits,
+        unitPrice: input.unitPrice,
+        operationsBudget: input.operationsBudget,
+        investmentDecision: input.investmentDecision,
+        adminNotes: input.adminNotes || 'Single-Admin validated & confirmed',
+        confirmationMethod: 'SINGLE_ADMIN_EXPLICIT_CONFIRMATION',
+      },
+    });
+
+    return decision;
+  }
+
+  async getAdminRoundDecisions(roundId: string) {
+    const round = await this.getRoundById(roundId);
+
+    // 1. Fetch teams for the event
+    const { data: teams, error: teamsErr } = await this.supabase
+      .from('teams')
+      .select('id, team_code, company_name, table_station, domain_id, domains(*)')
+      .eq('event_id', round.event_id)
+      .eq('is_disqualified', false)
+      .order('team_code');
+
+    if (teamsErr) throw new AppError('NOT_FOUND', `Failed to load teams: ${teamsErr.message}`, 500);
+
+    // 2. Fetch existing decisions for this round
+    const { data: decisions } = await this.supabase
+      .from('decisions')
+      .select('*')
+      .eq('round_id', roundId);
+
+    const decisionMap = new Map((decisions || []).map(d => [d.team_id, d]));
+
+    // 3. Fetch previous round snapshots for starting cash (if round > 1)
+    const cashMap = new Map<string, number>();
+    const roundEventData = round as { events?: { starting_capital?: number } };
+    const defaultCash = Number(roundEventData.events?.starting_capital ?? 1000000);
+
+    if (round.round_number > 1) {
+      const { data: prevRound } = await this.supabase
+        .from('rounds')
+        .select('id')
+        .eq('event_id', round.event_id)
+        .eq('round_number', round.round_number - 1)
+        .single();
+
+      if (prevRound) {
+        const { data: snapshots } = await this.supabase
+          .from('company_snapshots')
+          .select('team_id, ending_cash')
+          .eq('round_id', prevRound.id)
+          .eq('is_active', true);
+
+        for (const s of snapshots || []) {
+          cashMap.set(s.team_id, Number(s.ending_cash));
+        }
+      }
+    }
+
+    let verifiedCount = 0;
+    let enteredCount = 0;
+    let missingCount = 0;
+    let flaggedCount = 0;
+
+    const teamList = (teams || []).map(t => {
+      const d = decisionMap.get(t.id);
+      const domain = t.domains as {
+        code?: string;
+        name?: string;
+        base_demand?: number;
+        benchmark_price?: number;
+        min_allowed_price?: number;
+        max_allowed_price?: number;
+        base_unit_cogs?: number;
+      } | null;
+      const availableCash = cashMap.get(t.id) ?? defaultCash;
+
+      const status = d?.status || 'missing';
+      if (status === 'verified' || status === 'locked') verifiedCount++;
+      else if (status === 'entered') enteredCount++;
+      else if (status === 'flagged') flaggedCount++;
+      else missingCount++;
+
+      return {
+        teamId: t.id,
+        teamCode: t.team_code,
+        companyName: t.company_name,
+        tableStation: t.table_station,
+        domainId: t.domain_id,
+        domainCode: domain?.code || 'TECH',
+        domainName: domain?.name || 'Technology',
+        baseDemand: domain?.base_demand ?? 10000,
+        benchmarkPrice: Number(domain?.benchmark_price ?? 1000),
+        minAllowedPrice: Number(domain?.min_allowed_price ?? 500),
+        maxAllowedPrice: Number(domain?.max_allowed_price ?? 2000),
+        baseUnitCogs: Number(domain?.base_unit_cogs ?? 100),
+        availableCash,
+        decision: d ? {
+          id: d.id,
+          status: d.status,
+          marketingBudget: Number(d.marketing_budget),
+          rdBudget: Number(d.rd_budget),
+          productionUnits: Number(d.production_units),
+          unitPrice: Number(d.unit_price),
+          operationsBudget: Number(d.operations_budget),
+          investmentDecision: d.investment_decision,
+          enteredBy: d.entered_by,
+          enteredAt: d.entered_at,
+          verifiedBy: d.verified_by,
+          verifiedAt: d.verified_at,
+          adminOverrideNotes: d.admin_override_notes,
+        } : null,
+      };
+    });
+
+    const total = teamList.length;
+    const isReadyToLock = total > 0 && verifiedCount === total;
+
+    return {
+      round: {
+        id: round.id,
+        roundNumber: round.round_number,
+        status: round.status,
+        type: round.type,
+        eventId: round.event_id,
+      },
+      stats: {
+        total,
+        verifiedCount,
+        enteredCount,
+        missingCount,
+        flaggedCount,
+        isReadyToLock,
+      },
+      teams: teamList,
+    };
   }
 
   async getDecisions(roundId: string) {

@@ -23,6 +23,8 @@ export type ErrorCode =
   | 'ORGANIZER_APPROVALS_PENDING'
   | 'IDEMPOTENCY_CONFLICT'
   | 'CASCADE_GUARD_VIOLATION'
+  | 'UNVERIFIED_SUBMISSIONS'
+  | 'DECISION_LOCKED'
   | 'VALIDATION_ERROR';
 
 export class AppError extends Error {

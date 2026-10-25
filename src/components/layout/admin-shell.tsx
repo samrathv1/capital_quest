@@ -78,6 +78,12 @@ export function AdminShell({
       roles: ['super_admin', 'domain_coordinator'],
     },
     {
+      title: 'Admin Decisions',
+      href: '/admin/decisions',
+      icon: FileSpreadsheet,
+      roles: ['super_admin'],
+    },
+    {
       title: 'Round Readiness',
       href: '/admin/readiness',
       icon: CheckSquare,

@@ -7,6 +7,7 @@ import {
   AlertTriangle,
   Lock,
   RefreshCw,
+  FileSpreadsheet,
 } from 'lucide-react';
 import { AdminShell } from '@/components/layout/admin-shell';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
@@ -185,6 +186,17 @@ export default function RoundReadinessPage() {
           </div>
 
           <div className="flex items-center gap-2">
+            <Link href="/admin/decisions">
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5 border-emerald-800 text-emerald-400 hover:bg-emerald-950/40"
+              >
+                <FileSpreadsheet className="h-3.5 w-3.5" />
+                <span>Admin Decision Entry</span>
+              </Button>
+            </Link>
+
             <Button
               variant="outline"
               size="sm"
@@ -366,21 +378,21 @@ export default function RoundReadinessPage() {
                     </TableCell>
                     <TableCell className="text-right">
                       {t.status === 'missing' && (
-                        <Link href="/volunteer/entry">
+                        <Link href={`/admin/decisions?teamId=${t.id}`}>
                           <Button variant="outline" size="sm" className="h-7 text-xs">
-                            Digitize
+                            Enter Slip
                           </Button>
                         </Link>
                       )}
                       {t.status === 'entered' && (
-                        <Link href="/volunteer/verify">
+                        <Link href={`/admin/decisions?teamId=${t.id}`}>
                           <Button variant="emerald" size="sm" className="h-7 text-xs">
-                            Verify
+                            Confirm
                           </Button>
                         </Link>
                       )}
                       {t.status === 'flagged' && (
-                        <Link href="/volunteer/verify">
+                        <Link href={`/admin/decisions?teamId=${t.id}`}>
                           <Button variant="destructive" size="sm" className="h-7 text-xs">
                             Resolve
                           </Button>
