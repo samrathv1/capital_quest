@@ -47,19 +47,35 @@ export async function GET(req: NextRequest) {
       if (openRound) {
         roundId = openRound.id;
       } else {
-        // Fallback to latest round
-        const { data: latestRound } = await supabase
+        // Fallback to active round number if > 0, otherwise earliest unfinished round
+        const targetRoundNumber = activeEvent.active_round_number && activeEvent.active_round_number > 0
+          ? activeEvent.active_round_number
+          : 1;
+
+        const { data: targetRound } = await supabase
           .from('rounds')
           .select('id')
           .eq('event_id', activeEvent.id)
-          .order('round_number', { ascending: false })
-          .limit(1)
+          .eq('round_number', targetRoundNumber)
           .maybeSingle();
 
-        if (latestRound) {
-          roundId = latestRound.id;
+        if (targetRound) {
+          roundId = targetRound.id;
         } else {
-          throw new AppError('NOT_FOUND', 'No rounds found for tournament', 404);
+          // Fallback to earliest round sorted ascending
+          const { data: earliestRound } = await supabase
+            .from('rounds')
+            .select('id')
+            .eq('event_id', activeEvent.id)
+            .order('round_number', { ascending: true })
+            .limit(1)
+            .maybeSingle();
+
+          if (earliestRound) {
+            roundId = earliestRound.id;
+          } else {
+            throw new AppError('NOT_FOUND', 'No rounds found for tournament', 404);
+          }
         }
       }
     }

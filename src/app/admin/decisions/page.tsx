@@ -101,7 +101,7 @@ function AdminDecisionsContent() {
       const res = await fetch('/api/admin/decisions');
       const json = await res.json();
       if (!res.ok) {
-        throw new Error(json.message || 'Failed to load round decisions');
+        throw new Error(json.error?.message || json.message || 'Failed to load round decisions');
       }
       const roundData: RoundData = json.data;
       setData(roundData);
@@ -192,6 +192,13 @@ function AdminDecisionsContent() {
       return;
     }
 
+    if (data.round.status !== 'open') {
+      setErrorMsg(
+        `Round ${data.round.roundNumber} is currently in '${data.round.status.toUpperCase()}' status. Decisions can only be confirmed for an OPEN round. Please open Round ${data.round.roundNumber} from Round Control before confirming decisions.`
+      );
+      return;
+    }
+
     if (isOverspent) {
       setErrorMsg(
         `Planned cash outflow ($${totalPlannedOutflow.toLocaleString()}) exceeds available liquid cash ($${availableCash.toLocaleString()}) by $${cashDeficit.toLocaleString()}. Overspending decisions are strictly rejected per tournament rules.`
@@ -234,7 +241,7 @@ function AdminDecisionsContent() {
 
       const json = await res.json();
       if (!res.ok) {
-        throw new Error(json.message || 'Confirmation failed');
+        throw new Error(json.error?.message || json.message || 'Confirmation failed');
       }
 
       setSuccessMsg(`Decision for ${selectedTeam.teamCode} (${selectedTeam.companyName}) confirmed and verified successfully.`);
@@ -325,6 +332,16 @@ function AdminDecisionsContent() {
             <div className="text-xl font-bold font-mono text-rose-400 mt-0.5">{data?.stats.missingCount || 0}</div>
           </div>
         </div>
+
+        {data?.round.status === 'draft' && (
+          <Alert variant="warning" title={`Round ${data.round.roundNumber} in Draft Status`}>
+            Round {data.round.roundNumber} has not been opened yet. Decision entry and verification are only permitted when the round is OPEN. Please open Round {data.round.roundNumber} from{' '}
+            <Link href="/admin/rounds" className="underline font-bold text-amber-300 hover:text-amber-200">
+              Round Control
+            </Link>{' '}
+            before submitting decisions.
+          </Alert>
+        )}
 
         {errorMsg && (
           <Alert variant="error" title="Validation or System Error">
@@ -648,12 +665,16 @@ function AdminDecisionsContent() {
                           type="submit"
                           variant="emerald"
                           size="md"
-                          disabled={isOverspent || !isPriceValid || isSubmitting}
+                          disabled={data?.round.status !== 'open' || isOverspent || !isPriceValid || isSubmitting}
                           isLoading={isSubmitting}
                           className="font-bold shadow-lg gap-2"
                         >
                           <ShieldCheck className="h-4 w-4" />
-                          <span>Confirm & Verify Decision</span>
+                          <span>
+                            {data?.round.status === 'draft'
+                              ? `Round ${data.round.roundNumber} in Draft (Open Round First)`
+                              : 'Confirm & Verify Decision'}
+                          </span>
                         </Button>
                       </div>
                     )}

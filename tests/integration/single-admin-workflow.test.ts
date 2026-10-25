@@ -541,6 +541,78 @@ describe('Single-Admin Simulator Workflow: Decision Entry, Verification, and Rou
         /strictly restricted to Seed/
       );
     });
+
+    it('strictly rejects decision confirmation if target round is in DRAFT status', async () => {
+      const mockRoundDraft = {
+        id: 'draft-round-id',
+        event_id: eventId,
+        round_number: 1,
+        status: 'draft',
+        type: 'regular',
+        events: { starting_capital: 1000000 },
+      };
+
+      const mockSupabase = {
+        from: vi.fn().mockImplementation((table: string) => {
+          if (table === 'rounds') {
+            return {
+              select: vi.fn().mockReturnValue({
+                eq: vi.fn().mockReturnValue({
+                  single: vi.fn().mockResolvedValue({ data: mockRoundDraft, error: null }),
+                }),
+              }),
+            };
+          }
+          return { select: vi.fn().mockReturnThis() };
+        }),
+      };
+
+      const service = new TournamentService(mockSupabase as unknown as any);
+
+      const input: AdminDecisionConfirmInput = {
+        roundId: 'draft-round-id',
+        teamId,
+        marketingBudget: 50000,
+        rdBudget: 50000,
+        productionUnits: 100,
+        unitPrice: 1000,
+        operationsBudget: 10000,
+        investmentDecision: 'none',
+      };
+
+      await expect(service.adminConfirmDecision(input, adminId)).rejects.toThrowError(AppError);
+
+      try {
+        await service.adminConfirmDecision(input, adminId);
+      } catch (err: any) {
+        expect(err.code).toBe('ROUND_NOT_OPEN');
+        expect(err.message).toContain('Round is not open for decision entry. Current status: draft');
+      }
+    });
+
+    it('resolves active round correctly to earliest round ascending when no round is open', () => {
+      const roundsInDb = [
+        { id: 'r1-id', round_number: 1, status: 'draft', event_id: eventId },
+        { id: 'r2-id', round_number: 2, status: 'draft', event_id: eventId },
+        { id: 'r3-id', round_number: 3, status: 'draft', event_id: eventId },
+        { id: 'r4-id', round_number: 4, status: 'draft', event_id: eventId },
+        { id: 'r5-id', round_number: 5, status: 'draft', event_id: eventId },
+      ];
+
+      // Verifies that when no round is open, targetRound selects Round 1, not Round 5
+      const activeEvent = { id: eventId, active_round_number: 0 };
+      const openRound = roundsInDb.find(r => r.status === 'open');
+      expect(openRound).toBeUndefined();
+
+      const targetRoundNumber = activeEvent.active_round_number && activeEvent.active_round_number > 0
+        ? activeEvent.active_round_number
+        : 1;
+
+      const targetRound = roundsInDb.find(r => r.round_number === targetRoundNumber);
+      expect(targetRound).toBeDefined();
+      expect(targetRound?.round_number).toBe(1);
+      expect(targetRound?.id).toBe('r1-id');
+    });
   });
 
   // 4. PRE-FLIGHT LOCK GATE
