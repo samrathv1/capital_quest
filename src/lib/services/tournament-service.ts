@@ -105,6 +105,213 @@ export class TournamentService {
     return data;
   }
 
+  async deleteTeam(teamId: string, actorId?: string) {
+    // 1. Try atomic database transaction RPC first (PostgreSQL ACID transaction)
+    try {
+      const { data: rpcData, error: rpcErr } = await this.supabase.rpc('fn_safe_delete_team', {
+        p_team_id: teamId,
+        p_actor_id: actorId || null,
+      });
+
+      if (!rpcErr && rpcData) {
+        return rpcData as {
+          success: boolean;
+          deletedTeam: { id: string; teamCode: string; companyName: string };
+        };
+      }
+
+      if (rpcErr) {
+        if (rpcErr.message?.includes('not found') || rpcErr.code === 'P0002') {
+          throw new AppError('NOT_FOUND', `Team not found or already deleted: ${teamId}`, 404);
+        }
+        if (rpcErr.message?.includes('Access denied') || rpcErr.code === '42501') {
+          throw new AppError('FORBIDDEN', rpcErr.message, 403);
+        }
+        if (rpcErr.code === '23503' || rpcErr.message?.includes('Cannot delete team')) {
+          throw new AppError('CASCADE_GUARD_VIOLATION', rpcErr.message, 409);
+        }
+        const isFnMissing = rpcErr.message?.includes('function') && rpcErr.message?.includes('does not exist');
+        if (!isFnMissing) {
+          throw new AppError('VALIDATION_ERROR', `Failed to delete team: ${rpcErr.message}`, 400);
+        }
+      }
+    } catch (rpcCatchErr) {
+      if (rpcCatchErr instanceof AppError) throw rpcCatchErr;
+      // Fall through to JS-level fallback
+    }
+
+    // 2. JS-level fallback with identical safety rules
+    const { data: team, error: teamErr } = await this.supabase
+      .from('teams')
+      .select('id, event_id, domain_id, team_code, company_name, table_station')
+      .eq('id', teamId)
+      .maybeSingle();
+
+    if (teamErr) {
+      throw new AppError('VALIDATION_ERROR', `Failed to query team: ${teamErr.message}`, 500);
+    }
+
+    if (!team) {
+      throw new AppError('NOT_FOUND', `Team not found or already deleted: ${teamId}`, 404);
+    }
+
+    // 2. Check if any tournament rounds have already been simulated
+    const { data: simulatedRounds, error: roundsErr } = await this.supabase
+      .from('rounds')
+      .select('id, round_number, status')
+      .eq('event_id', team.event_id)
+      .in('status', ['simulated', 'reviewed', 'published']);
+
+    if (roundsErr) {
+      throw new AppError('VALIDATION_ERROR', `Failed to check round status: ${roundsErr.message}`, 500);
+    }
+
+    if (simulatedRounds && simulatedRounds.length > 0) {
+      const roundNums = simulatedRounds.map(r => r.round_number).join(', ');
+      throw new AppError(
+        'CASCADE_GUARD_VIOLATION',
+        `Cannot delete team: Tournament Round(s) [${roundNums}] have already been simulated. Modifying teams after simulation is prohibited to protect historical results.`,
+        400
+      );
+    }
+
+    // 3. Check for submitted or verified decisions
+    const { data: decisions, error: decsErr } = await this.supabase
+      .from('decisions')
+      .select('id, round_id, status')
+      .eq('team_id', teamId);
+
+    if (decsErr) {
+      throw new AppError('VALIDATION_ERROR', `Failed to check team decisions: ${decsErr.message}`, 500);
+    }
+
+    const activeDecisions = (decisions || []).filter(
+      d => d.status !== 'unsubmitted'
+    );
+    if (activeDecisions.length > 0) {
+      throw new AppError(
+        'CASCADE_GUARD_VIOLATION',
+        `Cannot delete team '${team.team_code}': Team has ${activeDecisions.length} submitted or verified decision(s) in active rounds.`,
+        409
+      );
+    }
+
+    // 4. Check for company snapshots (simulation history)
+    const { count: snapshotCount, error: snapErr } = await this.supabase
+      .from('company_snapshots')
+      .select('*', { count: 'exact', head: true })
+      .eq('team_id', teamId);
+
+    if (snapErr) {
+      throw new AppError('VALIDATION_ERROR', `Failed to check simulation snapshots: ${snapErr.message}`, 500);
+    }
+
+    if (snapshotCount && snapshotCount > 0) {
+      throw new AppError(
+        'CASCADE_GUARD_VIOLATION',
+        `Cannot delete team '${team.team_code}': Team has ${snapshotCount} simulation result snapshot(s) recorded in the database.`,
+        409
+      );
+    }
+
+    // 5. Check for financial ledger records
+    const { count: ledgerCount, error: ledgErr } = await this.supabase
+      .from('financial_ledger')
+      .select('*', { count: 'exact', head: true })
+      .eq('team_id', teamId);
+
+    if (ledgErr) {
+      throw new AppError('VALIDATION_ERROR', `Failed to check financial ledger: ${ledgErr.message}`, 500);
+    }
+
+    if (ledgerCount && ledgerCount > 0) {
+      throw new AppError(
+        'CASCADE_GUARD_VIOLATION',
+        `Cannot delete team '${team.team_code}': Financial ledger records exist for this company. Historical financial ledger entries cannot be removed.`,
+        409
+      );
+    }
+
+    // 6. Check for equity transactions
+    const { count: equityCount, error: eqErr } = await this.supabase
+      .from('equity_transactions')
+      .select('*', { count: 'exact', head: true })
+      .eq('team_id', teamId);
+
+    if (eqErr) {
+      throw new AppError('VALIDATION_ERROR', `Failed to check equity transactions: ${eqErr.message}`, 500);
+    }
+
+    if (equityCount && equityCount > 0) {
+      throw new AppError(
+        'CASCADE_GUARD_VIOLATION',
+        `Cannot delete team '${team.team_code}': Cap table or equity transactions exist for this company.`,
+        409
+      );
+    }
+
+    // 7. Remove any unsubmitted draft decision placeholders
+    if (decisions && decisions.length > 0) {
+      const { error: delDecErr } = await this.supabase
+        .from('decisions')
+        .delete()
+        .eq('team_id', teamId);
+
+      if (delDecErr) {
+        throw new AppError('VALIDATION_ERROR', `Failed to clean up draft decisions: ${delDecErr.message}`, 500);
+      }
+    }
+
+    // 8. Remove team roster members
+    const { error: delMemErr } = await this.supabase
+      .from('team_members')
+      .delete()
+      .eq('team_id', teamId);
+
+    if (delMemErr) {
+      throw new AppError('VALIDATION_ERROR', `Failed to remove team members: ${delMemErr.message}`, 500);
+    }
+
+    // 9. Delete the team record
+    const { error: delTeamErr } = await this.supabase
+      .from('teams')
+      .delete()
+      .eq('id', teamId);
+
+    if (delTeamErr) {
+      throw new AppError('VALIDATION_ERROR', `Failed to delete team record: ${delTeamErr.message}`, 500);
+    }
+
+    // 10. Audit logging
+    try {
+      await this.logAuditEvent({
+        actorId,
+        action: 'team.delete',
+        entityName: 'teams',
+        entityId: teamId,
+        beforeState: {
+          team_code: team.team_code,
+          company_name: team.company_name,
+          event_id: team.event_id,
+          domain_id: team.domain_id,
+          table_station: team.table_station,
+        },
+        afterState: undefined,
+      });
+    } catch {
+      // Non-fatal if audit logging encounters an issue in mock/test
+    }
+
+    return {
+      success: true,
+      deletedTeam: {
+        id: team.id,
+        teamCode: team.team_code,
+        companyName: team.company_name,
+      },
+    };
+  }
+
   async getActiveEvent() {
     const { data, error } = await this.supabase
       .from('events')

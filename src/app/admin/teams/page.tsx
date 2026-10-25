@@ -7,7 +7,10 @@ import {
   Filter,
   UserPlus,
   CheckCircle2,
+  Trash2,
+  AlertTriangle,
 } from 'lucide-react';
+import { createClient } from '@/lib/supabase/client';
 import { AdminShell } from '@/components/layout/admin-shell';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -77,6 +80,16 @@ export default function AdminTeamsPage() {
   const [isAddingMember, setIsAddingMember] = React.useState(false);
   const [memberError, setMemberError] = React.useState<string | null>(null);
 
+  // User role state for Super Admin permissions
+  const [userRole, setUserRole] = React.useState<string | null>(null);
+
+  // Delete Modal state
+  const [selectedTeamForDelete, setSelectedTeamForDelete] = React.useState<Team | null>(null);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = React.useState(false);
+  const [isDeleting, setIsDeleting] = React.useState(false);
+  const [deleteError, setDeleteError] = React.useState<string | null>(null);
+  const [actionSuccess, setActionSuccess] = React.useState<string | null>(null);
+
   const fetchData = async () => {
     setIsLoading(true);
     try {
@@ -101,7 +114,65 @@ export default function AdminTeamsPage() {
 
   React.useEffect(() => {
     fetchData();
+
+    // Check user role
+    const checkRole = async () => {
+      try {
+        const supabase = createClient();
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) {
+          const { data: profile } = await supabase
+            .from('profiles')
+            .select('role')
+            .eq('id', user.id)
+            .maybeSingle();
+          if (profile?.role) {
+            setUserRole(profile.role);
+          }
+        }
+      } catch {
+        // Fallback
+      }
+    };
+    checkRole();
   }, []);
+
+  const isSuperAdmin = userRole === 'super_admin';
+
+  // Handle Opening Delete Modal
+  const handleOpenDeleteModal = (team: Team) => {
+    setSelectedTeamForDelete(team);
+    setDeleteError(null);
+    setIsDeleteModalOpen(true);
+  };
+
+  // Handle Confirming Team Deletion
+  const handleConfirmDeleteTeam = async () => {
+    if (!selectedTeamForDelete) return;
+
+    setIsDeleting(true);
+    setDeleteError(null);
+    setActionSuccess(null);
+
+    try {
+      const res = await fetch(`/api/teams/${selectedTeamForDelete.id}`, {
+        method: 'DELETE',
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        throw new Error(json.message || json.error?.message || 'Failed to delete team.');
+      }
+
+      setIsDeleteModalOpen(false);
+      setActionSuccess(`Team ${selectedTeamForDelete.team_code} (${selectedTeamForDelete.company_name}) has been safely removed.`);
+      setSelectedTeamForDelete(null);
+      await fetchData();
+    } catch (err: unknown) {
+      setDeleteError(err instanceof Error ? err.message : 'Error deleting team.');
+    } finally {
+      setIsDeleting(false);
+    }
+  };
 
   // Handle Team Registration
   const handleRegisterTeam = async (e: React.FormEvent) => {
@@ -242,6 +313,22 @@ export default function AdminTeamsPage() {
           </Button>
         </div>
 
+        {/* ACTION SUCCESS BANNER */}
+        {actionSuccess && (
+          <Alert variant="success" className="animate-in fade-in duration-150">
+            <div className="flex justify-between items-center w-full">
+              <span>{actionSuccess}</span>
+              <button
+                type="button"
+                onClick={() => setActionSuccess(null)}
+                className="text-xs text-slate-300 hover:text-white underline ml-3 font-medium"
+              >
+                Dismiss
+              </button>
+            </div>
+          </Alert>
+        )}
+
         {/* SEARCH & FILTER TOOLBAR */}
         <div className="flex flex-col md:flex-row gap-3 items-stretch md:items-center justify-between">
           {/* SEARCH BAR */}
@@ -288,7 +375,7 @@ export default function AdminTeamsPage() {
                 <TableHead>Industry Domain</TableHead>
                 <TableHead>Table Station</TableHead>
                 <TableHead className="text-center">Status</TableHead>
-                <TableHead className="text-right">Roster</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -333,15 +420,29 @@ export default function AdminTeamsPage() {
                       </span>
                     </TableCell>
                     <TableCell className="text-right">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => handleOpenRoster(team)}
-                        className="text-xs h-8 text-indigo-400 hover:text-indigo-300 gap-1.5"
-                      >
-                        <UserPlus className="h-3.5 w-3.5" />
-                        <span>Roster</span>
-                      </Button>
+                      <div className="flex items-center justify-end gap-1.5">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleOpenRoster(team)}
+                          className="text-xs h-8 text-indigo-400 hover:text-indigo-300 gap-1.5"
+                        >
+                          <UserPlus className="h-3.5 w-3.5" />
+                          <span>Roster</span>
+                        </Button>
+                        {isSuperAdmin && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleOpenDeleteModal(team)}
+                            className="text-xs h-8 text-slate-400 hover:text-rose-400 hover:bg-rose-950/40 p-2"
+                            title={`Delete ${team.team_code}`}
+                            aria-label={`Delete ${team.team_code}`}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))
@@ -510,6 +611,87 @@ export default function AdminTeamsPage() {
               </Button>
             </div>
           </form>
+        </Modal>
+
+        {/* DELETE TEAM CONFIRMATION MODAL */}
+        <Modal
+          isOpen={isDeleteModalOpen}
+          onClose={() => {
+            if (!isDeleting) {
+              setIsDeleteModalOpen(false);
+              setDeleteError(null);
+            }
+          }}
+          title="Confirm Team Deletion"
+          description="Permanently remove this team and its roster from the active tournament."
+          maxWidth="md"
+        >
+          {deleteError && (
+            <Alert variant="error" className="mb-4">
+              {deleteError}
+            </Alert>
+          )}
+
+          {selectedTeamForDelete && (
+            <div className="space-y-4">
+              <div className="bg-rose-950/30 border border-rose-900/40 rounded-xl p-4 space-y-2">
+                <div className="flex items-start gap-3">
+                  <AlertTriangle className="h-5 w-5 text-rose-400 shrink-0 mt-0.5" />
+                  <div className="text-xs space-y-1">
+                    <p className="font-semibold text-rose-200">
+                      Are you sure you want to delete this team?
+                    </p>
+                    <p className="text-rose-300/80">
+                      This will permanently remove the team record and all associated founder roster entries.
+                      This action <span className="font-bold underline text-white">cannot be undone</span>.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs space-y-2 font-mono">
+                <div className="flex justify-between border-b border-slate-800/60 pb-1.5">
+                  <span className="text-slate-400">Team Code:</span>
+                  <span className="font-bold text-indigo-400">{selectedTeamForDelete.team_code}</span>
+                </div>
+                <div className="flex justify-between border-b border-slate-800/60 pb-1.5">
+                  <span className="text-slate-400">Company Name:</span>
+                  <span className="font-bold text-white">{selectedTeamForDelete.company_name}</span>
+                </div>
+                <div className="flex justify-between border-b border-slate-800/60 pb-1.5">
+                  <span className="text-slate-400">Domain:</span>
+                  <span className="text-slate-200">{selectedTeamForDelete.domains?.code || 'TECH'}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Table / Station:</span>
+                  <span className="text-slate-200">
+                    {selectedTeamForDelete.table_station ? `Station ${selectedTeamForDelete.table_station}` : 'Unassigned'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => setIsDeleteModalOpen(false)}
+                  disabled={isDeleting}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  variant="destructive"
+                  onClick={handleConfirmDeleteTeam}
+                  isLoading={isDeleting}
+                  className="gap-1.5"
+                >
+                  <Trash2 className="h-4 w-4" />
+                  <span>Confirm Deletion</span>
+                </Button>
+              </div>
+            </div>
+          )}
         </Modal>
       </div>
     </AdminShell>
