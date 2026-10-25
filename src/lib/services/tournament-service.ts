@@ -41,6 +41,17 @@ export interface PublicLeaderboardRow {
   brandEquityScore: number;
 }
 
+export interface CeremonyPresentationPayload {
+  isAvailable: boolean;
+  stage: 'waiting' | 'reveal_third' | 'reveal_second' | 'reveal_first' | 'podium';
+  winners: PublicLeaderboardRow[];
+  revealedWinners: PublicLeaderboardRow[];
+  currentReveal: PublicLeaderboardRow | null;
+  reason?: string;
+  message?: string;
+  isPodiumComplete?: boolean;
+}
+
 /**
  * CAPITAL QUEST — BACKEND OPERATIONS SERVICE
  * Reference: CQ-SPEC-05, CQ-SPEC-08
@@ -681,10 +692,11 @@ export class TournamentService {
     eventId?: string;
     roundNumber?: number;
     domainId?: string;
+    callerRole?: string;
   }) {
     // 1. Resolve event
     let eventId = params.eventId;
-    let event: { id: string; name: string; status: string; active_round_number: number } | null = null;
+    let event: { id: string; name: string; status: string; total_rounds?: number; active_round_number: number } | null = null;
     if (!eventId) {
       const activeEvent = await this.getActiveEvent();
       if (!activeEvent) {
@@ -703,7 +715,7 @@ export class TournamentService {
     } else {
       const { data: eventData, error: eventErr } = await this.supabase
         .from('events')
-        .select('id, name, status, active_round_number')
+        .select('id, name, status, total_rounds, active_round_number')
         .eq('id', eventId)
         .single();
       if (eventErr || !eventData) {
@@ -744,21 +756,63 @@ export class TournamentService {
       };
     }
 
-    // 3. Determine selected round
+    // 3. Determine selected round & Enforce Winner Embargo
+    const finalRoundNumber = event.total_rounds ?? 5;
+    const isStaffOrJudge = params.callerRole === 'super_admin' || params.callerRole === 'judge' || params.callerRole === 'domain_coordinator';
+    let isFinalRoundEmbargoed = false;
+
+    if (!isStaffOrJudge) {
+      try {
+        const state = await this.getPresentationState(event.id);
+        if (state.ceremonyStage !== 'podium') {
+          isFinalRoundEmbargoed = true;
+        }
+      } catch {
+        isFinalRoundEmbargoed = true;
+      }
+    }
+
+    const accessiblePublishedRounds = isFinalRoundEmbargoed
+      ? publishedRounds.filter(r => r.round_number < finalRoundNumber)
+      : publishedRounds;
+
     let selectedRound: { id: string; round_number: number; status: string; published_at: string | null };
     if (params.roundNumber !== undefined) {
-      const found = publishedRounds.find(r => r.round_number === params.roundNumber);
+      if (params.roundNumber >= finalRoundNumber && isFinalRoundEmbargoed) {
+        throw new AppError(
+          'FORBIDDEN',
+          'Final tournament results are strictly embargoed until the winner reveal ceremony concludes on the main stage.',
+          403
+        );
+      }
+      const found = accessiblePublishedRounds.find(r => r.round_number === params.roundNumber);
       if (!found) {
         throw new AppError('NOT_FOUND', `Round ${params.roundNumber} is not published yet.`, 404);
       }
       selectedRound = found;
     } else {
-      selectedRound = publishedRounds[publishedRounds.length - 1];
+      if (accessiblePublishedRounds.length === 0) {
+        return {
+          event: {
+            id: event.id,
+            name: event.name,
+            status: event.status,
+          },
+          hasPublishedRounds: false,
+          publishedRounds: [],
+          activeRoundNumber: event.active_round_number ?? 0,
+          selectedRoundNumber: null,
+          lastUpdated: null,
+          isFinalRoundEmbargoed: true,
+          leaderboard: [],
+        };
+      }
+      selectedRound = accessiblePublishedRounds[accessiblePublishedRounds.length - 1];
     }
 
     // 4. Identify immediately prior published round (if any) to calculate rank movement
-    const selectedIndex = publishedRounds.findIndex(r => r.id === selectedRound.id);
-    const priorRound = selectedIndex > 0 ? publishedRounds[selectedIndex - 1] : null;
+    const selectedIndex = accessiblePublishedRounds.findIndex(r => r.id === selectedRound.id);
+    const priorRound = selectedIndex > 0 ? accessiblePublishedRounds[selectedIndex - 1] : null;
 
     const priorRankMap = new Map<string, { tournamentRank: number; domainRank: number }>();
     if (priorRound) {
@@ -911,29 +965,30 @@ export class TournamentService {
         status: event.status,
       },
       hasPublishedRounds: true,
-      publishedRounds: publishedRounds.map(r => ({
+      publishedRounds: accessiblePublishedRounds.map(r => ({
         roundNumber: r.round_number,
         publishedAt: r.published_at,
       })),
       activeRoundNumber: event.active_round_number ?? 0,
       selectedRoundNumber: selectedRound.round_number,
       lastUpdated: selectedRound.published_at,
+      isFinalRoundEmbargoed,
       leaderboard,
     };
   }
 
   // Backward compatible leaderboard getter
-  async getLeaderboard(eventId: string, roundNumber?: number, domainId?: string) {
-    const result = await this.getPublicLeaderboard({ eventId, roundNumber, domainId });
+  async getLeaderboard(eventId: string, roundNumber?: number, domainId?: string, callerRole?: string) {
+    const result = await this.getPublicLeaderboard({ eventId, roundNumber, domainId, callerRole });
     return result.leaderboard;
   }
 
   // 4c. COMPANY PERFORMANCE & FINANCIAL REPORTS (PHASE 5)
-  async getCompanyPerformance(companyId: string) {
+  async getCompanyPerformance(companyId: string, callerRole?: string) {
     // 1. Resolve company by UUID id or team_code
     let teamQuery = this.supabase
       .from('teams')
-      .select('*, events(id, name, status, starting_capital, starting_valuation), domains(*)')
+      .select('*, events(id, name, status, starting_capital, starting_valuation, total_rounds), domains(*)')
       .limit(1);
 
     const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(companyId);
@@ -949,11 +1004,11 @@ export class TournamentService {
     }
 
     const team = teamData;
-    const event = team.events as { id: string; name: string; status: string; starting_capital?: number; starting_valuation?: number } | null;
+    const event = team.events as { id: string; name: string; status: string; starting_capital?: number; starting_valuation?: number; total_rounds?: number } | null;
     const domain = team.domains as { id: string; code: string; name: string } | null;
 
     // 2. Fetch all published rounds for this event
-    const { data: publishedRounds, error: roundsErr } = await this.supabase
+    const { data: publishedRoundsData, error: roundsErr } = await this.supabase
       .from('rounds')
       .select('id, round_number, status, type, published_at')
       .eq('event_id', team.event_id)
@@ -964,7 +1019,27 @@ export class TournamentService {
       throw new AppError('NOT_FOUND', `Failed to load published rounds: ${roundsErr.message}`, 500);
     }
 
-    if (!publishedRounds || publishedRounds.length === 0) {
+    const publishedRounds = publishedRoundsData || [];
+    const finalRoundNumber = event?.total_rounds ?? 5;
+    const isStaffOrJudge = callerRole === 'super_admin' || callerRole === 'judge' || callerRole === 'domain_coordinator';
+    let isFinalRoundEmbargoed = false;
+
+    if (!isStaffOrJudge) {
+      try {
+        const state = await this.getPresentationState(team.event_id);
+        if (state.ceremonyStage !== 'podium') {
+          isFinalRoundEmbargoed = true;
+        }
+      } catch {
+        isFinalRoundEmbargoed = true;
+      }
+    }
+
+    const accessiblePublishedRounds = isFinalRoundEmbargoed
+      ? publishedRounds.filter(r => r.round_number < finalRoundNumber)
+      : publishedRounds;
+
+    if (accessiblePublishedRounds.length === 0) {
       return {
         company: {
           id: team.id,
@@ -979,6 +1054,7 @@ export class TournamentService {
         },
         hasPublishedRounds: false,
         publishedRounds: [],
+        isFinalRoundEmbargoed,
         latestSnapshot: null,
         history: [],
         roundComparisons: [],
@@ -991,6 +1067,8 @@ export class TournamentService {
         ledgerEntries: [],
       };
     }
+
+    const accessibleRoundIds = new Set(accessiblePublishedRounds.map(r => r.id));
 
     // 3. Fetch active snapshots for this team across published rounds
     const { data: snapshotsData, error: snapErr } = await this.supabase
@@ -1008,7 +1086,7 @@ export class TournamentService {
       throw new AppError('NOT_FOUND', `Failed to load company snapshots: ${snapErr.message}`, 500);
     }
 
-    const snapshots = snapshotsData || [];
+    const snapshots = (snapshotsData || []).filter(s => s.round_id && accessibleRoundIds.has(s.round_id));
 
     // 4. Fetch equity transactions for published rounds
     const { data: equityData } = await this.supabase
@@ -1033,6 +1111,9 @@ export class TournamentService {
       .eq('is_voided', false)
       .eq('rounds.status', 'published')
       .order('created_at', { ascending: true });
+
+    const equityTransactions = (equityData || []).filter(e => e.round_id && accessibleRoundIds.has(e.round_id));
+    const ledgerEntries = (ledgerData || []).filter(l => l.round_id && accessibleRoundIds.has(l.round_id));
 
     // 6. Build Round History & Statements
     const initialCapital = Number(event?.starting_capital ?? 1000000);
@@ -1163,7 +1244,7 @@ export class TournamentService {
     }));
 
     // 9. Cap Table & Equity Transactions
-    const capTable = (equityData || []).map(eq => ({
+    const capTable = (equityTransactions || []).map(eq => ({
       id: eq.id,
       roundNumber: (eq.rounds as { round_number?: number } | null)?.round_number,
       roundType: (eq.rounds as { type?: string } | null)?.type,
@@ -1190,10 +1271,11 @@ export class TournamentService {
         eventName: event?.name ?? 'Capital Quest',
       },
       hasPublishedRounds: true,
-      publishedRounds: publishedRounds.map(r => ({
+      publishedRounds: accessiblePublishedRounds.map(r => ({
         roundNumber: r.round_number,
         publishedAt: r.published_at,
       })),
+      isFinalRoundEmbargoed,
       latestSnapshot,
       history,
       roundComparisons,
@@ -1203,7 +1285,7 @@ export class TournamentService {
         cashFlow,
         valuation,
       },
-      ledgerEntries: (ledgerData || []).map(l => ({
+      ledgerEntries: (ledgerEntries || []).map(l => ({
         id: l.id,
         roundNumber: (l.rounds as { round_number?: number } | null)?.round_number,
         entryType: l.entry_type,
@@ -2021,18 +2103,29 @@ export class TournamentService {
     // 4. Mode-specific data delivery
     let standings: PublicLeaderboardRow[] = [];
     let highlights: Record<string, unknown> | null = null;
-    let ceremony: Record<string, unknown> | null = null;
+    let ceremony: CeremonyPresentationPayload | null = null;
 
     if (state.mode === 'standings' || state.mode === 'domain') {
+      const finalRoundNumber = event.total_rounds ?? 5;
+      const isEmbargoed = state.ceremonyStage !== 'podium' && selectedRound.round_number >= finalRoundNumber;
+      const targetRoundNumber = isEmbargoed
+        ? (publishedRounds.filter(r => r.round_number < finalRoundNumber).pop()?.round_number ?? selectedRound.round_number)
+        : selectedRound.round_number;
+
       const domainFilter = state.mode === 'domain' && state.domainFilter !== 'ALL' ? state.domainFilter : undefined;
       const lb = await this.getPublicLeaderboard({
         eventId: targetEventId,
-        roundNumber: selectedRound.round_number,
+        roundNumber: targetRoundNumber,
         domainId: domainFilter ? (await this.resolveDomainId(targetEventId, domainFilter)) : undefined,
       });
       standings = lb.leaderboard;
     } else if (state.mode === 'highlights') {
-      highlights = await this.getRoundHighlights(targetEventId, selectedRound.round_number);
+      const finalRoundNumber = event.total_rounds ?? 5;
+      const isEmbargoed = state.ceremonyStage !== 'podium' && selectedRound.round_number >= finalRoundNumber;
+      const targetRoundNumber = isEmbargoed
+        ? (publishedRounds.filter(r => r.round_number < finalRoundNumber).pop()?.round_number ?? selectedRound.round_number)
+        : selectedRound.round_number;
+      highlights = await this.getRoundHighlights(targetEventId, targetRoundNumber);
     } else if (state.mode === 'ceremony') {
       // 5. STAGE EMBARGO & WINNER REVEAL (CRITICAL INTEGRITY)
       const finalRoundNumber = event.total_rounds ?? 5;
@@ -2044,12 +2137,14 @@ export class TournamentService {
           reason: `Final round (Round ${finalRoundNumber}) is not published yet. Winner reveal ceremony locked.`,
           stage: 'waiting',
           winners: [],
+          revealedWinners: [],
           currentReveal: null,
         };
       } else {
         const finalLb = await this.getPublicLeaderboard({
           eventId: targetEventId,
           roundNumber: finalRoundNumber,
+          callerRole: 'super_admin',
         });
 
         const topThree = finalLb.leaderboard.slice(0, 3);
@@ -2135,7 +2230,7 @@ export class TournamentService {
 
   // 6c. ROUND HIGHLIGHTS ENGINE
   async getRoundHighlights(eventId: string, roundNumber: number) {
-    const currentLb = await this.getPublicLeaderboard({ eventId, roundNumber });
+    const currentLb = await this.getPublicLeaderboard({ eventId, roundNumber, callerRole: 'super_admin' });
     const currentList = currentLb.leaderboard;
 
     if (currentList.length === 0) {
@@ -2161,7 +2256,7 @@ export class TournamentService {
       valuationGrowthPct: number;
     })[] = [];
     if (roundNumber > 1) {
-      const priorLb = await this.getPublicLeaderboard({ eventId, roundNumber: roundNumber - 1 });
+      const priorLb = await this.getPublicLeaderboard({ eventId, roundNumber: roundNumber - 1, callerRole: 'super_admin' });
       const priorValMap = new Map<string, number>();
       for (const p of priorLb.leaderboard) {
         priorValMap.set(p.teamId, p.valuation);
@@ -2261,6 +2356,7 @@ export class TournamentService {
       const finalLb = await this.getPublicLeaderboard({
         eventId: targetEventId,
         roundNumber: finalRoundNumber,
+        callerRole: 'super_admin',
       });
       topThreeCandidates = finalLb.leaderboard.slice(0, 3);
     }

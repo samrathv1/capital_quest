@@ -16,6 +16,7 @@ import {
   DollarSign,
   PieChart,
   Award,
+  ShieldAlert,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -62,6 +63,7 @@ interface LeaderboardApiResponse {
   activeRoundNumber: number;
   selectedRoundNumber: number | null;
   lastUpdated: string | null;
+  isFinalRoundEmbargoed?: boolean;
   leaderboard: LeaderboardEntry[];
 }
 
@@ -300,6 +302,20 @@ export default function PublicLeaderboardPage() {
               </div>
             )}
           </div>
+
+          {/* FINAL ROUND WINNER EMBARGO BANNER */}
+          {data?.isFinalRoundEmbargoed && (
+            <div className="p-4 rounded-xl border border-amber-900/60 bg-amber-950/30 flex items-start gap-3.5 text-amber-300 text-xs shadow-lg animate-in fade-in duration-200">
+              <ShieldAlert className="h-5 w-5 text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <div className="font-bold text-amber-200 text-sm">Final Round Results Embargoed — Winner Reveal in Progress</div>
+                <div className="text-amber-300/80 mt-1 leading-relaxed">
+                  Final tournament rankings and champion scores are currently under controlled announcement on the main stage. 
+                  Displaying results through Round {data.selectedRoundNumber}. Official final standings will unlock here upon conclusion of the podium reveal ceremony.
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* KPI CARDS */}
           {tournamentStats && (

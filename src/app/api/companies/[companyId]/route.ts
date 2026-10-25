@@ -17,14 +17,25 @@ export async function GET(req: NextRequest, context: RouteContext) {
     }
 
     let supabase;
+    let callerRole: string | undefined;
+
     try {
       supabase = await createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('role')
+          .eq('id', user.id)
+          .maybeSingle();
+        callerRole = profile?.role;
+      }
     } catch {
       supabase = createAdminClient();
     }
 
     const service = new TournamentService(supabase);
-    const performanceData = await service.getCompanyPerformance(companyId);
+    const performanceData = await service.getCompanyPerformance(companyId, callerRole);
 
     return successResponse(
       performanceData,

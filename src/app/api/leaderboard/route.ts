@@ -14,8 +14,19 @@ export async function GET(req: NextRequest) {
     const roundNumber = roundNumberStr !== null && roundNumberStr !== '' ? parseInt(roundNumberStr, 10) : undefined;
 
     let supabase;
+    let callerRole: string | undefined;
+
     try {
       supabase = await createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('role')
+          .eq('id', user.id)
+          .maybeSingle();
+        callerRole = profile?.role;
+      }
     } catch {
       supabase = createAdminClient();
     }
@@ -25,6 +36,7 @@ export async function GET(req: NextRequest) {
       eventId: eventIdParam || undefined,
       roundNumber,
       domainId,
+      callerRole,
     });
 
     return successResponse(
