@@ -19,13 +19,13 @@
   ```bash
   npx supabase migration list
   ```
-  *(Verify `20261021000000`, `20261021000001`, `20261024000000`, and `20261025000000_winner_embargo_rls` are applied).*
+  *(Verify `20261021000000`, `20261021000001`, `20261024000000`, `20261025000000`, and `20261025000001` are applied).*
 
 ---
 
 ## 2. Staff Account Provisioning
 
-Staff accounts are provisioned in Supabase Auth and mapped to `user_profiles` with authoritative roles:
+Staff accounts are provisioned in Supabase Auth and mapped to `profiles` with authoritative roles:
 - `super_admin`: Full administrative control, round lifecycle, simulation, voiding, podium release.
 - `domain_coordinator`: Domain-specific monitoring, submission tracking, missing sheet alerts.
 - `volunteer`: 10-key rapid paper digitizer and blind verification operator.
@@ -34,7 +34,7 @@ Staff accounts are provisioned in Supabase Auth and mapped to `user_profiles` wi
 Run the provisioning script or execute SQL in the Supabase SQL editor:
 ```sql
 -- Example: Assigning super admin role
-UPDATE public.user_profiles
+UPDATE public.profiles
 SET role = 'super_admin'
 WHERE id = '<auth-user-uuid>';
 ```
@@ -76,7 +76,7 @@ WHERE id = '<auth-user-uuid>';
    - Unit Sale Price ($)
    - Investment Choice (`none`, `offer_a`, `offer_b`, `reject_both`)
 4. Real-time budget validation alerts if total outflows exceed liquid cash.
-5. Click **"Submit Decision"**. Status changes to `pending_verification`.
+5. Click **"Submit Decision"**. Status changes to `entered` (pending verification).
 
 ---
 

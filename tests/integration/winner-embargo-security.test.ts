@@ -272,6 +272,48 @@ describe('Phase 7: Winner Embargo Security & Production Hardening', () => {
       );
     });
 
+    it('blocks volunteer from accessing final round rankings before podium', async () => {
+      const mockSupabase = createMockSupabase('waiting');
+      const service = new TournamentService(mockSupabase as unknown as any);
+
+      await expect(
+        service.getPublicLeaderboard({ eventId, roundNumber: 5, callerRole: 'volunteer' as any })
+      ).rejects.toThrow(
+        expect.objectContaining({
+          code: 'FORBIDDEN',
+          message: expect.stringContaining('strictly embargoed'),
+        })
+      );
+    });
+
+    it('blocks domain_coordinator from accessing final round rankings before podium', async () => {
+      const mockSupabase = createMockSupabase('waiting');
+      const service = new TournamentService(mockSupabase as unknown as any);
+
+      await expect(
+        service.getPublicLeaderboard({ eventId, roundNumber: 5, callerRole: 'domain_coordinator' as any })
+      ).rejects.toThrow(
+        expect.objectContaining({
+          code: 'FORBIDDEN',
+          message: expect.stringContaining('strictly embargoed'),
+        })
+      );
+    });
+
+    it('blocks public_observer (participant) from accessing final round rankings before podium', async () => {
+      const mockSupabase = createMockSupabase('waiting');
+      const service = new TournamentService(mockSupabase as unknown as any);
+
+      await expect(
+        service.getPublicLeaderboard({ eventId, roundNumber: 5, callerRole: 'public_observer' as any })
+      ).rejects.toThrow(
+        expect.objectContaining({
+          code: 'FORBIDDEN',
+          message: expect.stringContaining('strictly embargoed'),
+        })
+      );
+    });
+
     it('allows super_admin and judge to access final round rankings before podium', async () => {
       const mockSupabase = createMockSupabase('waiting');
       const service = new TournamentService(mockSupabase as unknown as any);
@@ -352,6 +394,30 @@ describe('Phase 7: Winner Embargo Security & Production Hardening', () => {
       expect(roundNumbers).toContain(5);
       expect(report.latestSnapshot?.roundNumber).toBe(5);
       expect(report.latestSnapshot?.companyValuation).toBe(3500000);
+    });
+
+    it('redacts final round from company reports for volunteer before podium', async () => {
+      const mockSupabase = createMockSupabase('waiting');
+      const service = new TournamentService(mockSupabase as unknown as any);
+
+      const report = await service.getCompanyPerformance('team-a', 'volunteer');
+
+      expect(report.isFinalRoundEmbargoed).toBe(true);
+      const roundNumbers = report.history.map((s: any) => s.roundNumber);
+      expect(roundNumbers).not.toContain(5);
+      expect(report.latestSnapshot?.roundNumber).toBe(4);
+    });
+
+    it('allows judge to view complete company reports including Round 5 before podium', async () => {
+      const mockSupabase = createMockSupabase('waiting');
+      const service = new TournamentService(mockSupabase as unknown as any);
+
+      const report = await service.getCompanyPerformance('team-a', 'judge');
+
+      expect(report.isFinalRoundEmbargoed).toBe(false);
+      const roundNumbers = report.history.map((s: any) => s.roundNumber);
+      expect(roundNumbers).toContain(5);
+      expect(report.latestSnapshot?.roundNumber).toBe(5);
     });
 
     it('releases complete Round 5 company reports to public once ceremonyStage reaches podium', async () => {

@@ -758,10 +758,10 @@ export class TournamentService {
 
     // 3. Determine selected round & Enforce Winner Embargo
     const finalRoundNumber = event.total_rounds ?? 5;
-    const isStaffOrJudge = params.callerRole === 'super_admin' || params.callerRole === 'judge' || params.callerRole === 'domain_coordinator';
+    const isOrganizerOrJudge = params.callerRole === 'super_admin' || params.callerRole === 'judge';
     let isFinalRoundEmbargoed = false;
 
-    if (!isStaffOrJudge) {
+    if (!isOrganizerOrJudge) {
       try {
         const state = await this.getPresentationState(event.id);
         if (state.ceremonyStage !== 'podium') {
@@ -1021,10 +1021,10 @@ export class TournamentService {
 
     const publishedRounds = publishedRoundsData || [];
     const finalRoundNumber = event?.total_rounds ?? 5;
-    const isStaffOrJudge = callerRole === 'super_admin' || callerRole === 'judge' || callerRole === 'domain_coordinator';
+    const isOrganizerOrJudge = callerRole === 'super_admin' || callerRole === 'judge';
     let isFinalRoundEmbargoed = false;
 
-    if (!isStaffOrJudge) {
+    if (!isOrganizerOrJudge) {
       try {
         const state = await this.getPresentationState(team.event_id);
         if (state.ceremonyStage !== 'podium') {
