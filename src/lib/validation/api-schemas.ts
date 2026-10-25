@@ -57,9 +57,18 @@ export const TeamMemberSchema = z.object({
   roleTitle: z.string().max(50).default('Co-Founder'),
 });
 
+export const UpdatePresentationStateSchema = z.object({
+  eventId: z.string().uuid().optional(),
+  mode: z.enum(['standings', 'domain', 'highlights', 'ceremony']).optional(),
+  selectedRoundNumber: z.number().int().min(1).optional(),
+  domainFilter: z.string().optional(),
+  ceremonyStage: z.enum(['waiting', 'reveal_third', 'reveal_second', 'reveal_first', 'podium']).optional(),
+});
+
 export type DecisionSubmitInput = z.infer<typeof DecisionSubmitSchema>;
 export type SimulateRoundInput = z.infer<typeof SimulateRoundSchema>;
 export type VoidRoundInput = z.infer<typeof VoidRoundSchema>;
 export type OrganizerApprovalInput = z.infer<typeof OrganizerApprovalSchema>;
 export type TeamRegisterInput = z.infer<typeof TeamRegisterSchema>;
 export type TeamMemberInput = z.infer<typeof TeamMemberSchema>;
+export type UpdatePresentationStateInput = z.infer<typeof UpdatePresentationStateSchema>;

@@ -189,16 +189,17 @@ export default function CompanyPerformancePage() {
     fetchCompanyData();
   }, [fetchCompanyData]);
 
-  const formatCurrency = (val: number) => {
+  const formatCurrency = (val: number, decimals: number = 2) => {
     return new Intl.NumberFormat('en-US', {
       style: 'currency',
       currency: 'USD',
-      maximumFractionDigits: 0,
+      minimumFractionDigits: decimals,
+      maximumFractionDigits: decimals,
     }).format(val);
   };
 
   const formatPercent = (val: number) => {
-    return `${Number(val).toFixed(1)}%`;
+    return `${Number(val).toFixed(2)}%`;
   };
 
   if (isLoading) {
@@ -497,7 +498,7 @@ export default function CompanyPerformancePage() {
                       ))}
                     </tr>
                     <tr className="hover:bg-slate-800/30 text-slate-400">
-                      <td className="py-2.5 px-4 font-sans">Less: Inventory Holding Cost ($20 / unsold unit)</td>
+                      <td className="py-2.5 px-4 font-sans">Less: Inventory Holding Cost (Domain Unit Rate × Unsold Units)</td>
                       {financialStatements.incomeStatement.map(s => (
                         <td key={s.roundNumber} className="py-2.5 px-4 text-right">
                           ({formatCurrency(s.inventoryHoldingCost)})
@@ -518,7 +519,7 @@ export default function CompanyPerformancePage() {
                       ))}
                     </tr>
                     <tr className="hover:bg-slate-800/30 text-slate-400">
-                      <td className="py-2.5 px-4 font-sans">Corporate Tax Expense (25% on taxable gain)</td>
+                      <td className="py-2.5 px-4 font-sans">Corporate Tax Expense (20% on taxable gain)</td>
                       {financialStatements.incomeStatement.map(s => (
                         <td key={s.roundNumber} className="py-2.5 px-4 text-right">
                           ({formatCurrency(s.taxExpense)})

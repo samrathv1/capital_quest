@@ -104,16 +104,17 @@ export default function PublicLeaderboardPage() {
     fetchLeaderboard(selectedRound);
   }, [selectedRound, fetchLeaderboard]);
 
-  const formatCurrency = (val: number) => {
+  const formatCurrency = (val: number, decimals: number = 0) => {
     return new Intl.NumberFormat('en-US', {
       style: 'currency',
       currency: 'USD',
-      maximumFractionDigits: 0,
+      minimumFractionDigits: decimals,
+      maximumFractionDigits: decimals,
     }).format(val);
   };
 
   const formatPercent = (val: number) => {
-    return `${Number(val).toFixed(1)}%`;
+    return `${Number(val).toFixed(2)}%`;
   };
 
   const formatDateTime = (iso: string | null) => {
@@ -466,7 +467,7 @@ export default function PublicLeaderboardPage() {
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
               {/* DOMAIN TABS */}
               <div className="flex flex-wrap gap-1 p-1 rounded-xl bg-slate-900 border border-slate-800 text-xs">
-                {['ALL', 'CLEANTECH', 'HEALTHTECH', 'FINTECH', 'EDTECH'].map(d => (
+                {['ALL', 'CLEANTECH', 'HEALTHTECH', 'SAAS', 'D2C'].map(d => (
                   <button
                     key={d}
                     onClick={() => setSelectedDomain(d)}

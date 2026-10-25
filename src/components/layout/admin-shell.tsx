@@ -17,6 +17,7 @@ import {
   Sliders,
   PlayCircle,
   Trophy,
+  MonitorPlay,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -105,6 +106,12 @@ export function AdminShell({
       href: '/leaderboard',
       icon: Trophy,
       roles: ['super_admin', 'judge', 'domain_coordinator', 'volunteer'],
+    },
+    {
+      title: 'Stage Controller',
+      href: '/admin/presentation',
+      icon: MonitorPlay,
+      roles: ['super_admin', 'judge'],
     },
   ];
 

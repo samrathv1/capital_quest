@@ -4,6 +4,43 @@ import { DecisionSubmitInput, VoidRoundInput } from '@/lib/validation/api-schema
 import { D } from '@/engine/math/precision';
 import { assertOrganizerPoliciesApproved } from './organizer-approvals';
 
+interface PresentationEventRecord {
+  id: string;
+  name: string;
+  status: string;
+  total_rounds: number;
+  active_round_number: number;
+}
+
+export interface PublicLeaderboardRow {
+  rank: number;
+  tournamentRank: number;
+  domainRank: number;
+  previousRank: number | null;
+  rankMovement: number | null;
+  teamId: string;
+  companyId: string;
+  teamCode: string;
+  companyName: string;
+  tableStation: string | null;
+  domainId: string;
+  domainCode: string;
+  domainName: string;
+  valuation: number;
+  retainedEquityPct: number;
+  equityAdjustedScore: number;
+  finalScore: number;
+  endingCash: number;
+  grossRevenue: number;
+  netIncome: number;
+  ebitda: number;
+  cogs: number;
+  operatingExpenses: number;
+  marketSharePct: number;
+  productQualityIndex: number;
+  brandEquityScore: number;
+}
+
 /**
  * CAPITAL QUEST — BACKEND OPERATIONS SERVICE
  * Reference: CQ-SPEC-05, CQ-SPEC-08
@@ -1816,5 +1853,445 @@ export class TournamentService {
     const { data, error } = await query.order('created_at', { ascending: false }).limit(100);
     if (error) throw new AppError('NOT_FOUND', `Failed to load audit logs: ${error.message}`, 500);
     return data;
+  }
+
+  // 6. PRESENTATION & WINNER REVEAL (PHASE 6)
+  async getPresentationState(eventId: string) {
+    const { data, error } = await this.supabase
+      .from('presentation_state')
+      .select('*')
+      .eq('event_id', eventId)
+      .maybeSingle();
+
+    if (error || !data) {
+      return {
+        eventId,
+        mode: 'standings' as const,
+        selectedRoundNumber: 1,
+        domainFilter: 'ALL' as const,
+        ceremonyStage: 'waiting' as const,
+        updatedAt: new Date().toISOString(),
+      };
+    }
+
+    return {
+      eventId: data.event_id,
+      mode: data.mode as 'standings' | 'domain' | 'highlights' | 'ceremony',
+      selectedRoundNumber: data.selected_round_number,
+      domainFilter: data.domain_filter as 'ALL' | 'CLEANTECH' | 'HEALTHTECH' | 'SAAS' | 'D2C',
+      ceremonyStage: data.ceremony_stage as 'waiting' | 'reveal_third' | 'reveal_second' | 'reveal_first' | 'podium',
+      updatedAt: data.updated_at,
+    };
+  }
+
+  async updatePresentationState(
+    eventId: string,
+    update: {
+      mode?: 'standings' | 'domain' | 'highlights' | 'ceremony';
+      selectedRoundNumber?: number;
+      domainFilter?: string;
+      ceremonyStage?: 'waiting' | 'reveal_third' | 'reveal_second' | 'reveal_first' | 'podium';
+    },
+    operatorId?: string
+  ) {
+    // 1. Fetch current event details
+    const { data: event, error: eventErr } = await this.supabase
+      .from('events')
+      .select('id, name, total_rounds, active_round_number')
+      .eq('id', eventId)
+      .single();
+
+    if (eventErr || !event) {
+      throw new AppError('NOT_FOUND', `Tournament event not found: ${eventId}`, 404);
+    }
+
+    // 2. Security Gate: Verify Ceremony Activation & Reveal Progression
+    const finalRoundNumber = event.total_rounds ?? 5;
+    const isActivatingCeremony = update.mode === 'ceremony';
+    const isAdvancingReveal = update.ceremonyStage && update.ceremonyStage !== 'waiting';
+
+    if (isActivatingCeremony || isAdvancingReveal) {
+      const { data: finalRound } = await this.supabase
+        .from('rounds')
+        .select('id, round_number, status')
+        .eq('event_id', eventId)
+        .eq('round_number', finalRoundNumber)
+        .maybeSingle();
+
+      if (!finalRound || finalRound.status !== 'published') {
+        throw new AppError(
+          'FORBIDDEN',
+          `Winner reveal ceremony is strictly embargoed until the final round (Round ${finalRoundNumber}) is officially published. Current status: ${finalRound?.status ?? 'unopened'}`,
+          403
+        );
+      }
+    }
+
+    // 3. Upsert into presentation_state
+    const currentState = await this.getPresentationState(eventId);
+    const newState = {
+      event_id: eventId,
+      mode: update.mode ?? currentState.mode,
+      selected_round_number: update.selectedRoundNumber ?? currentState.selectedRoundNumber,
+      domain_filter: update.domainFilter ?? currentState.domainFilter,
+      ceremony_stage: update.ceremonyStage ?? currentState.ceremonyStage,
+      updated_at: new Date().toISOString(),
+      updated_by: operatorId || null,
+    };
+
+    const { error: upsertErr } = await this.supabase
+      .from('presentation_state')
+      .upsert(newState, { onConflict: 'event_id' });
+
+    if (upsertErr) {
+      console.warn('Failed to persist presentation_state:', upsertErr.message);
+    }
+
+    return {
+      eventId: newState.event_id,
+      mode: newState.mode,
+      selectedRoundNumber: newState.selected_round_number,
+      domainFilter: newState.domain_filter,
+      ceremonyStage: newState.ceremony_stage,
+      updatedAt: newState.updated_at,
+    };
+  }
+
+  // 6b. PUBLIC PRESENTATION DATA (WITH STRICT STAGE EMBARGO)
+  async getPublicPresentationData(eventId?: string) {
+    // 1. Resolve event
+    let targetEventId: string;
+    let event: PresentationEventRecord;
+    if (!eventId) {
+      const activeEvent = await this.getActiveEvent();
+      if (!activeEvent) {
+        return {
+          event: null,
+          hasPublishedRounds: false,
+          state: null,
+          standings: [],
+          highlights: null,
+          ceremony: null,
+        };
+      }
+      targetEventId = activeEvent.id;
+      event = activeEvent;
+    } else {
+      targetEventId = eventId;
+      const { data: evData, error: evErr } = await this.supabase
+        .from('events')
+        .select('id, name, status, total_rounds, active_round_number')
+        .eq('id', targetEventId)
+        .single();
+      if (evErr || !evData) {
+        throw new AppError('NOT_FOUND', `Tournament event not found: ${targetEventId}`, 404);
+      }
+      event = evData;
+    }
+
+    // 2. Fetch presentation state
+    const state = await this.getPresentationState(targetEventId);
+
+    // 3. Fetch published rounds
+    const { data: publishedRoundsData } = await this.supabase
+      .from('rounds')
+      .select('id, round_number, status, published_at')
+      .eq('event_id', targetEventId)
+      .eq('status', 'published')
+      .order('round_number', { ascending: true });
+
+    const publishedRounds = publishedRoundsData || [];
+    if (publishedRounds.length === 0) {
+      return {
+        event: { id: event.id, name: event.name, status: event.status, totalRounds: event.total_rounds },
+        hasPublishedRounds: false,
+        state,
+        publishedRounds: [],
+        standings: [],
+        highlights: null,
+        ceremony: null,
+      };
+    }
+
+    let selectedRound = publishedRounds.find(r => r.round_number === state.selectedRoundNumber);
+    if (!selectedRound) {
+      selectedRound = publishedRounds[publishedRounds.length - 1];
+    }
+
+    // 4. Mode-specific data delivery
+    let standings: PublicLeaderboardRow[] = [];
+    let highlights: Record<string, unknown> | null = null;
+    let ceremony: Record<string, unknown> | null = null;
+
+    if (state.mode === 'standings' || state.mode === 'domain') {
+      const domainFilter = state.mode === 'domain' && state.domainFilter !== 'ALL' ? state.domainFilter : undefined;
+      const lb = await this.getPublicLeaderboard({
+        eventId: targetEventId,
+        roundNumber: selectedRound.round_number,
+        domainId: domainFilter ? (await this.resolveDomainId(targetEventId, domainFilter)) : undefined,
+      });
+      standings = lb.leaderboard;
+    } else if (state.mode === 'highlights') {
+      highlights = await this.getRoundHighlights(targetEventId, selectedRound.round_number);
+    } else if (state.mode === 'ceremony') {
+      // 5. STAGE EMBARGO & WINNER REVEAL (CRITICAL INTEGRITY)
+      const finalRoundNumber = event.total_rounds ?? 5;
+      const finalRound = publishedRounds.find(r => r.round_number === finalRoundNumber);
+
+      if (!finalRound) {
+        ceremony = {
+          isAvailable: false,
+          reason: `Final round (Round ${finalRoundNumber}) is not published yet. Winner reveal ceremony locked.`,
+          stage: 'waiting',
+          winners: [],
+          currentReveal: null,
+        };
+      } else {
+        const finalLb = await this.getPublicLeaderboard({
+          eventId: targetEventId,
+          roundNumber: finalRoundNumber,
+        });
+
+        const topThree = finalLb.leaderboard.slice(0, 3);
+        const rank3Winner = topThree.find(w => w.tournamentRank === 3) || topThree[2] || null;
+        const rank2Winner = topThree.find(w => w.tournamentRank === 2) || topThree[1] || null;
+        const rank1Winner = topThree.find(w => w.tournamentRank === 1) || topThree[0] || null;
+
+        // Embargo filter strictly by ceremonyStage
+        if (state.ceremonyStage === 'waiting') {
+          ceremony = {
+            isAvailable: true,
+            stage: 'waiting',
+            winners: [],
+            revealedWinners: [],
+            currentReveal: null,
+            message: 'Grand Finale Podium Ceremony Commencing...',
+          };
+        } else if (state.ceremonyStage === 'reveal_third') {
+          const winners = rank3Winner ? [rank3Winner] : [];
+          ceremony = {
+            isAvailable: true,
+            stage: 'reveal_third',
+            winners,
+            revealedWinners: winners,
+            currentReveal: rank3Winner,
+            message: 'Third Place — Bronze Podium Winner',
+          };
+        } else if (state.ceremonyStage === 'reveal_second') {
+          const winners = [rank3Winner, rank2Winner].filter(Boolean);
+          ceremony = {
+            isAvailable: true,
+            stage: 'reveal_second',
+            winners,
+            revealedWinners: winners,
+            currentReveal: rank2Winner,
+            message: 'Second Place — Silver Podium Winner',
+          };
+        } else if (state.ceremonyStage === 'reveal_first') {
+          const winners = [rank3Winner, rank2Winner, rank1Winner].filter(Boolean);
+          ceremony = {
+            isAvailable: true,
+            stage: 'reveal_first',
+            winners,
+            revealedWinners: winners,
+            currentReveal: rank1Winner,
+            message: 'Grand Champion — Capital Quest First Place',
+          };
+        } else if (state.ceremonyStage === 'podium') {
+          const winners = [rank1Winner, rank2Winner, rank3Winner].filter(Boolean);
+          ceremony = {
+            isAvailable: true,
+            stage: 'podium',
+            winners,
+            revealedWinners: winners,
+            currentReveal: null,
+            isPodiumComplete: true,
+            message: 'Official Capital Quest Tournament Podium',
+          };
+        }
+      }
+    }
+
+    return {
+      event: {
+        id: event.id,
+        name: event.name,
+        status: event.status,
+        totalRounds: event.total_rounds,
+      },
+      hasPublishedRounds: true,
+      state,
+      publishedRounds: publishedRounds.map(r => ({
+        roundNumber: r.round_number,
+        publishedAt: r.published_at,
+      })),
+      selectedRoundNumber: selectedRound.round_number,
+      standings,
+      highlights,
+      ceremony,
+      lastUpdated: new Date().toISOString(),
+    };
+  }
+
+  // 6c. ROUND HIGHLIGHTS ENGINE
+  async getRoundHighlights(eventId: string, roundNumber: number) {
+    const currentLb = await this.getPublicLeaderboard({ eventId, roundNumber });
+    const currentList = currentLb.leaderboard;
+
+    if (currentList.length === 0) {
+      return {
+        roundNumber,
+        topScorers: [],
+        revenueLeaders: [],
+        valuationGrowthLeaders: [],
+        rankClimbers: [],
+        domainLeaders: [],
+        equityRetentionStandouts: [],
+      };
+    }
+
+    const topScorers = currentList.slice(0, 3);
+
+    const revenueLeaders = [...currentList]
+      .sort((a, b) => b.grossRevenue - a.grossRevenue)
+      .slice(0, 3);
+
+    let valuationGrowthLeaders: (PublicLeaderboardRow & {
+      valuationDelta: number;
+      valuationGrowthPct: number;
+    })[] = [];
+    if (roundNumber > 1) {
+      const priorLb = await this.getPublicLeaderboard({ eventId, roundNumber: roundNumber - 1 });
+      const priorValMap = new Map<string, number>();
+      for (const p of priorLb.leaderboard) {
+        priorValMap.set(p.teamId, p.valuation);
+      }
+
+      valuationGrowthLeaders = [...currentList]
+        .map(curr => {
+          const priorVal = priorValMap.get(curr.teamId) ?? 200000;
+          const valDelta = curr.valuation - priorVal;
+          const growthPct = priorVal > 0 ? (valDelta / priorVal) * 100 : 0;
+          return {
+            ...curr,
+            valuationDelta: valDelta,
+            valuationGrowthPct: growthPct,
+          };
+        })
+        .sort((a, b) => b.valuationDelta - a.valuationDelta)
+        .slice(0, 3);
+    } else {
+      valuationGrowthLeaders = [...currentList]
+        .map(curr => {
+          const valDelta = curr.valuation - 200000;
+          const growthPct = (valDelta / 200000) * 100;
+          return {
+            ...curr,
+            valuationDelta: valDelta,
+            valuationGrowthPct: growthPct,
+          };
+        })
+        .sort((a, b) => b.valuationDelta - a.valuationDelta)
+        .slice(0, 3);
+    }
+
+    const rankClimbers = [...currentList]
+      .filter(item => item.rankMovement !== null && item.rankMovement > 0)
+      .sort((a, b) => (b.rankMovement ?? 0) - (a.rankMovement ?? 0))
+      .slice(0, 3);
+
+    const domainLeaderMap = new Map<string, PublicLeaderboardRow>();
+    for (const item of currentList) {
+      if (item.domainRank === 1) {
+        domainLeaderMap.set(item.domainCode.toUpperCase(), item);
+      }
+    }
+    const domainLeaders = Array.from(domainLeaderMap.values());
+
+    const equityRetentionStandouts = [...currentList.slice(0, 10)]
+      .sort((a, b) => b.retainedEquityPct - a.retainedEquityPct)
+      .slice(0, 3);
+
+    return {
+      roundNumber,
+      topScorers,
+      revenueLeaders,
+      valuationGrowthLeaders,
+      rankClimbers,
+      domainLeaders,
+      equityRetentionStandouts,
+    };
+  }
+
+  // 6d. PRESENTER CONTROLLER DATA (PRIVILEGED)
+  async getAdminPresentationData(eventId?: string) {
+    let targetEventId: string;
+    let event: PresentationEventRecord;
+    if (!eventId) {
+      const activeEvent = await this.getActiveEvent();
+      if (!activeEvent) throw new AppError('NOT_FOUND', 'No active tournament event found', 404);
+      targetEventId = activeEvent.id;
+      event = activeEvent;
+    } else {
+      targetEventId = eventId;
+      const { data: evData, error: evErr } = await this.supabase
+        .from('events')
+        .select('id, name, status, total_rounds, active_round_number')
+        .eq('id', targetEventId)
+        .single();
+      if (evErr || !evData) throw new AppError('NOT_FOUND', `Event not found: ${targetEventId}`, 404);
+      event = evData;
+    }
+
+    const state = await this.getPresentationState(targetEventId);
+
+    const { data: publishedRounds } = await this.supabase
+      .from('rounds')
+      .select('id, round_number, status, published_at')
+      .eq('event_id', targetEventId)
+      .eq('status', 'published')
+      .order('round_number', { ascending: true });
+
+    const finalRoundNumber = event.total_rounds ?? 5;
+    const finalRound = (publishedRounds || []).find(r => r.round_number === finalRoundNumber);
+    const isFinalRoundPublished = Boolean(finalRound);
+
+    let topThreeCandidates: PublicLeaderboardRow[] = [];
+    if (isFinalRoundPublished) {
+      const finalLb = await this.getPublicLeaderboard({
+        eventId: targetEventId,
+        roundNumber: finalRoundNumber,
+      });
+      topThreeCandidates = finalLb.leaderboard.slice(0, 3);
+    }
+
+    return {
+      event: {
+        id: event.id,
+        name: event.name,
+        status: event.status,
+        totalRounds: event.total_rounds,
+        activeRoundNumber: event.active_round_number,
+      },
+      state,
+      publishedRounds: (publishedRounds || []).map(r => ({
+        roundNumber: r.round_number,
+        publishedAt: r.published_at,
+      })),
+      finalRoundNumber,
+      isFinalRoundPublished,
+      topThreeCandidates,
+    };
+  }
+
+  private async resolveDomainId(eventId: string, domainCode: string): Promise<string | undefined> {
+    const { data } = await this.supabase
+      .from('domains')
+      .select('id')
+      .eq('event_id', eventId)
+      .ilike('code', domainCode)
+      .maybeSingle();
+
+    return data?.id;
   }
 }
