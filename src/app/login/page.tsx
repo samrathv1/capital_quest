@@ -57,11 +57,13 @@ function LoginContent() {
     }
   };
 
-  // Demo Credentials Quick-Fill for Development Testing
+  // Demo Credentials Quick-Fill for Local Development Testing Only
   const handleDemoFill = (demoEmail: string) => {
-    setEmail(demoEmail);
-    setPassword('CapitalQuest2026!');
-    setErrorMsg(null);
+    if (process.env.NODE_ENV === 'development') {
+      setEmail(demoEmail);
+      setPassword('CapitalQuest2026!');
+      setErrorMsg(null);
+    }
   };
 
   return (
