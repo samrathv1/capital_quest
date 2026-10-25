@@ -294,7 +294,9 @@ export default function AdminRoundsPage() {
     }
   };
 
-  const currentRound = data?.rounds.find((r) => r.round_number === data?.activeRoundNumber);
+  const currentRound =
+    data?.rounds.find((r) => (r.round_number ?? (r as unknown as { roundNumber?: number }).roundNumber) === data?.activeRoundNumber) ||
+    data?.rounds[0];
 
   return (
     <AdminShell
@@ -339,7 +341,7 @@ export default function AdminRoundsPage() {
               onClick={() => setPolicyModalOpen(true)}
               className="border-slate-700"
             >
-              {data?.organizerPolicies.allApproved ? (
+              {data?.organizerPolicies?.allApproved ? (
                 <>
                   <ShieldCheck className="h-4 w-4 mr-2 text-emerald-400" />
                   Policies Approved
@@ -354,7 +356,7 @@ export default function AdminRoundsPage() {
           </div>
         </div>
         {/* Policy Approval Banner */}
-        {data && !data.organizerPolicies.allApproved && (
+        {data && !data.organizerPolicies?.allApproved && (
           <Alert variant="warning" className="border-amber-500/40 bg-amber-500/10">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
               <div className="space-y-1">
@@ -366,7 +368,7 @@ export default function AdminRoundsPage() {
                   Official tournament simulation is gated until the organizers formally record sign-off on valuation, tax, and standard VC investment mechanics.
                 </p>
                 <div className="flex flex-wrap gap-2 pt-1">
-                  {data.organizerPolicies.pendingPolicies.map((p, idx) => (
+                  {(data.organizerPolicies?.pendingPolicies || []).map((p, idx) => (
                     <span key={idx} className="text-[11px] font-mono bg-amber-950/60 text-amber-300 border border-amber-800/60 rounded px-2 py-0.5">
                       • {p}
                     </span>
@@ -451,12 +453,14 @@ export default function AdminRoundsPage() {
               Loading tournament round statuses and decision metrics...
             </div>
           ) : (
-            data?.rounds.map((round) => {
-              const isCurrent = round.round_number === data.activeRoundNumber;
-              const { decisionStats } = round;
+            (data?.rounds || []).map((round) => {
+              const rNumber = round.round_number ?? (round as unknown as { roundNumber?: number }).roundNumber ?? 1;
+              const isCurrent = rNumber === (data?.activeRoundNumber ?? 1);
+              const decisionStats = round.decisionStats || ({} as RoundOverviewItem['decisionStats']);
+              const totalEligible = decisionStats.totalEligible ?? (decisionStats as unknown as { total?: number }).total ?? 0;
               const verifiedPercent =
-                decisionStats.totalEligible > 0
-                  ? Math.round((decisionStats.verified / decisionStats.totalEligible) * 100)
+                totalEligible > 0
+                  ? Math.round((decisionStats.verified / totalEligible) * 100)
                   : 0;
 
               return (
@@ -472,7 +476,7 @@ export default function AdminRoundsPage() {
                       <div className="space-y-2 lg:max-w-md">
                         <div className="flex items-center gap-3">
                           <span className="text-xl font-bold font-mono text-white">
-                            ROUND {round.round_number}
+                            ROUND {rNumber}
                           </span>
                           <Badge variant={getStatusBadgeVariant(round.status)} className="uppercase text-xs font-semibold">
                             {round.status}
@@ -494,13 +498,13 @@ export default function AdminRoundsPage() {
                           )}
                         </div>
                         <p className="text-xs text-slate-400 font-medium">
-                          {getRoundTypeLabel(round.type, round.round_number)}
+                          {getRoundTypeLabel(round.type, rNumber)}
                         </p>
 
                         {/* Market Event Indicator */}
-                        {round.marketEvents.length > 0 && (
+                        {(round.marketEvents || []).length > 0 && (
                           <div className="flex flex-wrap gap-2 pt-1">
-                            {round.marketEvents.map((evt, idx) => (
+                            {(round.marketEvents || []).map((evt, idx) => (
                               <span
                                 key={idx}
                                 className="text-[11px] font-mono bg-slate-950 text-sky-300 border border-slate-800 rounded px-2 py-0.5 flex items-center gap-1.5"
@@ -513,10 +517,10 @@ export default function AdminRoundsPage() {
                         )}
 
                         {/* Blockers Alert if any */}
-                        {round.blockers.length > 0 && round.status !== 'published' && (
+                        {(round.blockers || []).length > 0 && round.status !== 'published' && (
                           <div className="mt-2 text-[11px] text-amber-300 bg-amber-950/40 border border-amber-900/60 rounded px-2.5 py-1.5 space-y-0.5">
                             <span className="font-semibold block text-amber-400">Action Blockers:</span>
-                            {round.blockers.map((blocker, bIdx) => (
+                            {(round.blockers || []).map((blocker, bIdx) => (
                               <p key={bIdx} className="leading-tight">• {blocker}</p>
                             ))}
                           </div>
@@ -574,7 +578,7 @@ export default function AdminRoundsPage() {
                             variant="primary"
                             size="sm"
                             disabled={
-                              !round.allowedTransitions.includes('open') ||
+                              !(round.allowedTransitions || []).includes('open') ||
                               isActionPending === round.id
                             }
                             onClick={() => handleOpenRound(round)}
@@ -598,7 +602,7 @@ export default function AdminRoundsPage() {
                               variant="primary"
                               size="sm"
                               disabled={
-                                !round.allowedTransitions.includes('lock') ||
+                                !(round.allowedTransitions || []).includes('lock') ||
                                 isActionPending === round.id
                               }
                               onClick={() => handleLockRound(round)}
@@ -622,7 +626,7 @@ export default function AdminRoundsPage() {
                             <Button
                               variant="primary"
                               size="sm"
-                              disabled={!round.allowedTransitions.includes('simulate')}
+                              disabled={!(round.allowedTransitions || []).includes('simulate')}
                               onClick={() => {
                                 setTargetRound(round);
                                 setSimConfirmed(false);
@@ -771,29 +775,29 @@ export default function AdminRoundsPage() {
             <div className="bg-slate-950 border border-slate-800 rounded-lg p-4 space-y-3 text-xs">
               <div className="flex justify-between border-b border-slate-800/60 pb-2">
                 <span className="text-slate-400">Target Round:</span>
-                <span className="font-mono font-bold text-white">Round {targetRound.round_number} ({targetRound.type})</span>
+                <span className="font-mono font-bold text-white">Round {targetRound.round_number ?? (targetRound as unknown as { roundNumber?: number }).roundNumber} ({targetRound.type})</span>
               </div>
               <div className="flex justify-between border-b border-slate-800/60 pb-2">
                 <span className="text-slate-400">Eligible Companies:</span>
-                <span className="font-mono font-bold text-white">{targetRound.decisionStats.totalEligible} companies</span>
+                <span className="font-mono font-bold text-white">{targetRound.decisionStats?.totalEligible ?? (targetRound.decisionStats as unknown as { total?: number })?.total ?? 0} companies</span>
               </div>
               <div className="flex justify-between border-b border-slate-800/60 pb-2">
                 <span className="text-slate-400">Verified Decisions:</span>
                 <span className="font-mono font-bold text-emerald-400">
-                  {targetRound.decisionStats.verified} / {targetRound.decisionStats.totalEligible} verified
+                  {targetRound.decisionStats?.verified ?? 0} / {targetRound.decisionStats?.totalEligible ?? (targetRound.decisionStats as unknown as { total?: number })?.total ?? 0} verified
                 </span>
               </div>
               <div className="flex justify-between border-b border-slate-800/60 pb-2">
                 <span className="text-slate-400">Policy Gate:</span>
-                <span className={`font-mono font-bold ${data?.organizerPolicies.allApproved ? 'text-emerald-400' : 'text-amber-400'}`}>
-                  {data?.organizerPolicies.allApproved ? 'Approved (4/4 policies)' : 'Approval Pending'}
+                <span className={`font-mono font-bold ${data?.organizerPolicies?.allApproved ? 'text-emerald-400' : 'text-amber-400'}`}>
+                  {data?.organizerPolicies?.allApproved ? 'Approved (4/4 policies)' : 'Approval Pending'}
                 </span>
               </div>
               <div>
                 <span className="text-slate-400 block mb-1">Active Market Events:</span>
-                {targetRound.marketEvents.length > 0 ? (
+                {(targetRound.marketEvents || []).length > 0 ? (
                   <div className="space-y-1">
-                    {targetRound.marketEvents.map((evt, idx) => (
+                    {(targetRound.marketEvents || []).map((evt, idx) => (
                       <div key={idx} className="bg-slate-900 border border-slate-800 rounded p-2 text-slate-300">
                         <strong className="text-sky-300 font-mono">{evt.domain}:</strong> {evt.event_name}
                         <span className="text-slate-400 block text-[11px]">{evt.impact_description}</span>
@@ -840,7 +844,7 @@ export default function AdminRoundsPage() {
                 variant="primary"
                 size="sm"
                 onClick={handleExecuteSimulation}
-                disabled={!simConfirmed || isSimulating || !data?.organizerPolicies.allApproved}
+                disabled={!simConfirmed || isSimulating || !data?.organizerPolicies?.allApproved}
                 className="bg-purple-600 hover:bg-purple-500 text-white font-semibold"
               >
                 {isSimulating ? (
@@ -879,8 +883,8 @@ export default function AdminRoundsPage() {
             <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs space-y-1">
               <div className="flex items-center justify-between">
                 <strong className="text-slate-200">1. Cash Valuation Contribution Policy</strong>
-                <Badge variant={data?.organizerPolicies.allApproved ? 'success' : 'warning'} className="text-[10px]">
-                  {data?.organizerPolicies.allApproved ? 'APPROVED' : 'PENDING'}
+                <Badge variant={data?.organizerPolicies?.allApproved ? 'success' : 'warning'} className="text-[10px]">
+                  {data?.organizerPolicies?.allApproved ? 'APPROVED' : 'PENDING'}
                 </Badge>
               </div>
               <p className="text-slate-400">
@@ -891,8 +895,8 @@ export default function AdminRoundsPage() {
             <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs space-y-1">
               <div className="flex items-center justify-between">
                 <strong className="text-slate-200">2. Corporate Taxation Policy</strong>
-                <Badge variant={data?.organizerPolicies.allApproved ? 'success' : 'warning'} className="text-[10px]">
-                  {data?.organizerPolicies.allApproved ? 'APPROVED' : 'PENDING'}
+                <Badge variant={data?.organizerPolicies?.allApproved ? 'success' : 'warning'} className="text-[10px]">
+                  {data?.organizerPolicies?.allApproved ? 'APPROVED' : 'PENDING'}
                 </Badge>
               </div>
               <p className="text-slate-400">
@@ -903,8 +907,8 @@ export default function AdminRoundsPage() {
             <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs space-y-1">
               <div className="flex items-center justify-between">
                 <strong className="text-slate-200">3. Standardized Uniform VC Offers</strong>
-                <Badge variant={data?.organizerPolicies.allApproved ? 'success' : 'warning'} className="text-[10px]">
-                  {data?.organizerPolicies.allApproved ? 'APPROVED' : 'PENDING'}
+                <Badge variant={data?.organizerPolicies?.allApproved ? 'success' : 'warning'} className="text-[10px]">
+                  {data?.organizerPolicies?.allApproved ? 'APPROVED' : 'PENDING'}
                 </Badge>
               </div>
               <p className="text-slate-400">
@@ -915,8 +919,8 @@ export default function AdminRoundsPage() {
             <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs space-y-1">
               <div className="flex items-center justify-between">
                 <strong className="text-slate-200">4. Strict Spending Solvency Policy</strong>
-                <Badge variant={data?.organizerPolicies.allApproved ? 'success' : 'warning'} className="text-[10px]">
-                  {data?.organizerPolicies.allApproved ? 'APPROVED' : 'PENDING'}
+                <Badge variant={data?.organizerPolicies?.allApproved ? 'success' : 'warning'} className="text-[10px]">
+                  {data?.organizerPolicies?.allApproved ? 'APPROVED' : 'PENDING'}
                 </Badge>
               </div>
               <p className="text-slate-400">

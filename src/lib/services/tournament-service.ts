@@ -2110,16 +2110,27 @@ export class TournamentService {
       .from('decisions')
       .select('round_id, team_id, status');
 
+    // Fetch event record for active_round_number pointer
+    const { data: eventRecord } = await this.supabase
+      .from('events')
+      .select('active_round_number')
+      .eq('id', eventId)
+      .maybeSingle();
+
+    const activeRoundNumber = eventRecord?.active_round_number && eventRecord.active_round_number > 0
+      ? eventRecord.active_round_number
+      : 1;
+
     // Fetch market events
     const { data: marketEvents } = await this.supabase
       .from('market_events')
-      .select('*')
+      .select('*, domains(code)')
       .eq('event_id', eventId);
 
     // Fetch latest simulation runs
     const { data: simRuns } = await this.supabase
       .from('simulation_runs')
-      .select('round_id, id, run_version, status, is_active, created_at, execution_duration_ms')
+      .select('round_id, id, run_version, status, is_active, created_at, execution_duration_ms, input_state_hash, executed_by')
       .eq('is_active', true);
 
     const runMap = new Map((simRuns || []).map(r => [r.round_id, r]));
@@ -2139,6 +2150,7 @@ export class TournamentService {
       const entered = decs.filter(d => d.status === 'entered').length;
       const verified = decs.filter(d => d.status === 'verified' || d.status === 'locked').length;
       const flagged = decs.filter(d => d.status === 'flagged').length;
+      const locked = decs.filter(d => d.status === 'locked').length;
       const submittedTeamIds = new Set(decs.map(d => d.team_id));
       const missing = Math.max(0, eligibleCount - submittedTeamIds.size);
 
@@ -2166,31 +2178,69 @@ export class TournamentService {
         blockers.push('Round results must be formally reviewed and reconciled.');
       }
 
+      // Compute allowed transitions
+      const allowedTransitions: string[] = [];
+      if (r.status === 'draft') {
+        if (blockers.length === 0) allowedTransitions.push('open');
+      } else if (r.status === 'open') {
+        allowedTransitions.push('lock');
+      } else if (r.status === 'locked') {
+        if (policyApproval.approved) allowedTransitions.push('simulate');
+      } else if (r.status === 'simulated') {
+        allowedTransitions.push('review', 'void');
+      } else if (r.status === 'reviewed') {
+        allowedTransitions.push('publish', 'void');
+      }
+
+      const roundMarketEvents = (marketEvents || [])
+        .filter(me => me.activation_round === r.round_number)
+        .map(me => ({
+          domain: (me.domains as { code?: string } | null)?.code || 'ALL',
+          event_name: me.name,
+          impact_description: me.description,
+        }));
+
       return {
         id: r.id,
+        round_number: r.round_number,
         roundNumber: r.round_number,
         type: r.type,
         status: r.status,
+        opened_at: r.opened_at,
         openedAt: r.opened_at,
+        locked_at: r.locked_at,
         lockedAt: r.locked_at,
+        simulated_at: r.simulated_at,
         simulatedAt: r.simulated_at,
+        published_at: r.published_at,
         publishedAt: r.published_at,
         eligibleCompaniesCount: eligibleCount,
         decisionStats: {
           total: eligibleCount,
+          totalEligible: eligibleCount,
           entered,
           verified,
           flagged,
           missing,
+          locked,
           isAllVerified: eligibleCount > 0 && verified === eligibleCount,
         },
+        marketEvents: roundMarketEvents,
         marketEvent: activeEvent ? {
           name: activeEvent.name,
           description: activeEvent.description,
           demandMultiplier: Number(activeEvent.demand_multiplier),
           costMultiplier: Number(activeEvent.cost_multiplier),
         } : null,
-        latestRun: latestRun || null,
+        latestRun: latestRun ? {
+          id: latestRun.id,
+          run_number: latestRun.run_version,
+          status: latestRun.status,
+          completed_at: latestRun.created_at,
+          input_hash: latestRun.input_state_hash,
+          created_by: latestRun.executed_by,
+        } : null,
+        allowedTransitions,
         blockers,
         canOpen: r.status === 'draft' && blockers.length === 0,
         canLock: r.status === 'open' && (missing === 0 && flagged === 0 && entered === 0),
@@ -2203,9 +2253,14 @@ export class TournamentService {
 
     return {
       eventId,
+      activeRoundNumber,
       eligibleCompaniesCount: eligibleCount,
       allPoliciesApproved: policyApproval.approved,
       pendingPolicies: policyApproval.pendingPolicies,
+      organizerPolicies: {
+        allApproved: policyApproval.approved,
+        pendingPolicies: policyApproval.pendingPolicies,
+      },
       rounds: roundsOverview,
     };
   }
