@@ -99,7 +99,7 @@ export default function AdminTeamsPage() {
 
       if (event) {
         setActiveEventId(event.id);
-        setDomains(event.domains || []);
+        setDomains((event.domains || []).filter((d: { is_active?: boolean; code?: string }) => d.is_active !== false && !['clean', 'cleantech'].includes(d.code?.toLowerCase() || '')));
 
         const teamsRes = await fetch(`/api/teams?eventId=${event.id}`);
         const teamsJson = await teamsRes.json();
@@ -348,7 +348,7 @@ export default function AdminTeamsPage() {
               <Filter className="h-3 w-3" />
               <span>Filter:</span>
             </span>
-            {['ALL', 'CLEAN', 'HEALTH', 'SAAS', 'D2C'].map(code => (
+            {['ALL', 'D2C', 'HEALTH', 'SAAS'].map(code => (
               <button
                 key={code}
                 type="button"

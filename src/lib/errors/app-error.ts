@@ -25,6 +25,7 @@ export type ErrorCode =
   | 'CASCADE_GUARD_VIOLATION'
   | 'UNVERIFIED_SUBMISSIONS'
   | 'DECISION_LOCKED'
+  | 'INACTIVE_DOMAIN_ASSIGNED'
   | 'VALIDATION_ERROR';
 
 export class AppError extends Error {

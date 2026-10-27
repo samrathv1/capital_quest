@@ -20,7 +20,9 @@ import {
   Clock,
   Sparkles,
   Award,
+  Trash2,
 } from 'lucide-react';
+import { createClient } from '@/lib/supabase/client';
 import { AdminShell } from '@/components/layout/admin-shell';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -67,6 +69,7 @@ interface RoundsOverviewData {
   eventId?: string;
   rounds: RoundOverviewItem[];
   activeRoundNumber: number;
+  eligibleCompaniesCount?: number;
   organizerPolicies: {
     allApproved: boolean;
     pendingPolicies: string[];
@@ -103,6 +106,26 @@ export default function AdminRoundsPage() {
   // Action pending state
   const [isActionPending, setIsActionPending] = React.useState<string | null>(null);
 
+  // User role state
+  const [userRole, setUserRole] = React.useState<string | null>(null);
+
+  // Reset Round Decisions modal state
+  const [resetRoundModalOpen, setResetRoundModalOpen] = React.useState(false);
+  const [targetResetRound, setTargetResetRound] = React.useState<RoundOverviewItem | null>(null);
+  const [resetRoundReason, setResetRoundReason] = React.useState('');
+  const [resetRoundTargetStatus, setResetRoundTargetStatus] = React.useState<'draft' | 'open'>('draft');
+  const [resetRoundTypedConfirm, setResetRoundTypedConfirm] = React.useState('');
+  const [isResettingRound, setIsResettingRound] = React.useState(false);
+  const [resetRoundError, setResetRoundError] = React.useState<string | null>(null);
+
+  // Reset Entire Tournament modal state
+  const [resetTournamentModalOpen, setResetTournamentModalOpen] = React.useState(false);
+  const [resetTournamentReason, setResetTournamentReason] = React.useState('');
+  const [resetTournamentTypedConfirm, setResetTournamentTypedConfirm] = React.useState('');
+  const [resetTournamentConfirmPublished, setResetTournamentConfirmPublished] = React.useState(false);
+  const [isResettingTournament, setIsResettingTournament] = React.useState(false);
+  const [resetTournamentError, setResetTournamentError] = React.useState<string | null>(null);
+
   const fetchData = async () => {
     setIsLoading(true);
     setError(null);
@@ -122,7 +145,114 @@ export default function AdminRoundsPage() {
 
   React.useEffect(() => {
     fetchData();
+
+    // Check user role
+    const checkRole = async () => {
+      try {
+        const supabase = createClient();
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) {
+          const { data: profile } = await supabase
+            .from('profiles')
+            .select('role')
+            .eq('id', user.id)
+            .maybeSingle();
+          if (profile?.role) {
+            setUserRole(profile.role);
+          }
+        }
+      } catch {
+        // Fallback
+      }
+    };
+    checkRole();
   }, []);
+
+  const isSuperAdmin = userRole === 'super_admin';
+
+  const handleResetRoundDecisions = async () => {
+    if (!targetResetRound) return;
+    const expectedPhrase = `RESET ROUND ${targetResetRound.round_number}`;
+    if (resetRoundTypedConfirm.trim() !== expectedPhrase) {
+      setResetRoundError(`Confirmation text must match exactly: "${expectedPhrase}"`);
+      return;
+    }
+    if (resetRoundReason.trim().length < 5) {
+      setResetRoundError('Please provide a structured reason (minimum 5 characters).');
+      return;
+    }
+
+    setIsResettingRound(true);
+    setResetRoundError(null);
+    try {
+      const res = await fetch(`/api/rounds/${targetResetRound.id}/reset`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reason: resetRoundReason.trim(),
+          targetStatus: resetRoundTargetStatus,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        throw new Error(json.error?.message || 'Failed to reset round decisions');
+      }
+      setActionSuccess(
+        `Round ${targetResetRound.round_number} decisions successfully reset to ${json.data.new_status}. ${json.data.decisions_cleared} test decision(s) cleared. ${json.data.teams_preserved} teams preserved.`
+      );
+      setResetRoundModalOpen(false);
+      setTargetResetRound(null);
+      setResetRoundReason('');
+      setResetRoundTypedConfirm('');
+      await fetchData();
+    } catch (err: unknown) {
+      setResetRoundError(err instanceof Error ? err.message : 'Error resetting round decisions');
+    } finally {
+      setIsResettingRound(false);
+    }
+  };
+
+  const handleResetEntireTournament = async () => {
+    if (!data?.eventId) return;
+    if (resetTournamentTypedConfirm.trim() !== 'RESET TOURNAMENT') {
+      setResetTournamentError('Confirmation phrase must match exactly: "RESET TOURNAMENT"');
+      return;
+    }
+    if (resetTournamentReason.trim().length < 5) {
+      setResetTournamentError('Please provide a structured reason (minimum 5 characters).');
+      return;
+    }
+
+    setIsResettingTournament(true);
+    setResetTournamentError(null);
+    try {
+      const res = await fetch(`/api/events/${data.eventId}/reset`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reason: resetTournamentReason.trim(),
+          confirmPhrase: 'RESET TOURNAMENT',
+          confirmPublished: resetTournamentConfirmPublished,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        throw new Error(json.error?.message || 'Failed to reset tournament');
+      }
+      setActionSuccess(
+        `Tournament successfully reset to initial baseline! All 5 rounds reset to draft. ${json.data.teams_preserved} teams and ${json.data.team_members_preserved || 0} participants preserved. Zero financial contamination remaining.`
+      );
+      setResetTournamentModalOpen(false);
+      setResetTournamentReason('');
+      setResetTournamentTypedConfirm('');
+      setResetTournamentConfirmPublished(false);
+      await fetchData();
+    } catch (err: unknown) {
+      setResetTournamentError(err instanceof Error ? err.message : 'Error resetting tournament');
+    } finally {
+      setIsResettingTournament(false);
+    }
+  };
 
   const handleOpenRound = async (round: RoundOverviewItem) => {
     setIsActionPending(round.id);
@@ -720,6 +850,26 @@ export default function AdminRoundsPage() {
                             </Button>
                           </Link>
                         )}
+
+                        {/* Reset Round Decisions (Pre-simulation rounds: draft, open, locked if unsimulated) */}
+                        {isSuperAdmin && ['draft', 'open', 'locked'].includes(round.status) && !round.latestRun && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              setTargetResetRound(round);
+                              setResetRoundReason('');
+                              setResetRoundTypedConfirm('');
+                              setResetRoundTargetStatus('draft');
+                              setResetRoundError(null);
+                              setResetRoundModalOpen(true);
+                            }}
+                            className="border-rose-900/60 text-rose-400 hover:text-rose-200 hover:bg-rose-950/40 text-xs"
+                          >
+                            <RotateCcw className="h-3.5 w-3.5 mr-1 text-rose-400" />
+                            Reset Decisions
+                          </Button>
+                        )}
                       </div>
                     </div>
 
@@ -756,6 +906,40 @@ export default function AdminRoundsPage() {
             })
           )}
         </div>
+
+        {/* 6. SUPER ADMIN DANGER ZONE: TOURNAMENT RESET & REHEARSAL RESTART */}
+        {isSuperAdmin && (
+          <Card className="border-rose-900/60 bg-gradient-to-br from-rose-950/30 via-slate-900 to-slate-950 mt-6">
+            <CardHeader className="pb-3">
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                <div>
+                  <CardTitle className="text-sm font-bold text-rose-400 flex items-center gap-2">
+                    <AlertTriangle className="h-4 w-4 text-rose-400" />
+                    Super Admin Danger Zone: Rehearsal Restart & Tournament Reset
+                  </CardTitle>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Completely reset all 5 rounds back to draft and clear test simulation history while preserving all registered teams and participant rosters.
+                  </p>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setResetTournamentReason('');
+                    setResetTournamentTypedConfirm('');
+                    setResetTournamentConfirmPublished(false);
+                    setResetTournamentError(null);
+                    setResetTournamentModalOpen(true);
+                  }}
+                  className="border-rose-700 bg-rose-950/60 hover:bg-rose-900 text-rose-200 hover:text-white text-xs font-semibold shrink-0"
+                >
+                  <Trash2 className="h-4 w-4 mr-1.5 text-rose-400" />
+                  Reset Entire Tournament
+                </Button>
+              </div>
+            </CardHeader>
+          </Card>
+        )}
       </div>
 
       {/* 1. SIMULATION EXECUTION MODAL */}
@@ -1057,6 +1241,273 @@ export default function AdminRoundsPage() {
             </div>
           </div>
         )}
+      </Modal>
+
+      {/* 4. RESET ROUND DECISIONS MODAL */}
+      <Modal
+        isOpen={resetRoundModalOpen}
+        onClose={() => setResetRoundModalOpen(false)}
+        title={targetResetRound ? `Reset Round ${targetResetRound.round_number} Decisions` : 'Reset Round Decisions'}
+        description="Clear test or erroneous decisions for this round and restore it to a valid starting baseline."
+        maxWidth="lg"
+      >
+        {targetResetRound && (
+          <div className="space-y-4">
+            {resetRoundError && (
+              <Alert variant="error">
+                <AlertTriangle className="h-4 w-4" />
+                <span className="text-xs">{resetRoundError}</span>
+              </Alert>
+            )}
+
+            <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3.5 space-y-2 text-xs">
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <span className="text-slate-400 block">Current Status:</span>
+                  <span className="font-mono font-bold text-white uppercase">{targetResetRound.status}</span>
+                </div>
+                <div>
+                  <span className="text-slate-400 block">Decisions Affected:</span>
+                  <span className="font-mono font-bold text-amber-400">
+                    {(targetResetRound.decisionStats.entered || 0) + (targetResetRound.decisionStats.verified || 0) + (targetResetRound.decisionStats.locked || 0)} decision(s)
+                  </span>
+                </div>
+                <div>
+                  <span className="text-slate-400 block">Preserved Teams:</span>
+                  <span className="font-mono font-bold text-emerald-400">
+                    {targetResetRound.decisionStats.totalEligible || data?.eligibleCompaniesCount || 0} teams
+                  </span>
+                </div>
+                <div>
+                  <span className="text-slate-400 block">Simulation Runs:</span>
+                  <span className="font-mono font-bold text-slate-300">0 (Pre-simulation)</span>
+                </div>
+              </div>
+              <p className="text-[11px] text-slate-400 border-t border-slate-800/80 pt-2 leading-relaxed">
+                <span className="text-rose-400 font-semibold">Note:</span> This will permanently erase unsimulated decision records for this round. Team rosters, company profiles, and other rounds will not be altered.
+              </p>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs font-semibold text-slate-300 block mb-1">
+                  Target Round Status After Reset:
+                </label>
+                <div className="flex gap-4 text-xs">
+                  <label className="flex items-center gap-1.5 cursor-pointer text-slate-300">
+                    <input
+                      type="radio"
+                      name="targetStatus"
+                      value="draft"
+                      checked={resetRoundTargetStatus === 'draft'}
+                      onChange={() => setResetRoundTargetStatus('draft')}
+                      className="text-sky-600 focus:ring-sky-500"
+                    />
+                    <span>Draft (Recommended — Requires clicking Open to restart)</span>
+                  </label>
+                  <label className="flex items-center gap-1.5 cursor-pointer text-slate-300">
+                    <input
+                      type="radio"
+                      name="targetStatus"
+                      value="open"
+                      checked={resetRoundTargetStatus === 'open'}
+                      onChange={() => setResetRoundTargetStatus('open')}
+                      className="text-sky-600 focus:ring-sky-500"
+                    />
+                    <span>Open (Immediately open for fresh decision entry)</span>
+                  </label>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-slate-300 block mb-1">
+                  Mandatory Audit Reason (min 5 chars):
+                </label>
+                <textarea
+                  rows={2}
+                  placeholder="e.g., Clearing rehearsal test submissions before live competition round entry"
+                  value={resetRoundReason}
+                  onChange={(e) => setResetRoundReason(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-slate-300 block mb-1">
+                  Type <span className="font-mono text-rose-400 select-all font-bold">RESET ROUND {targetResetRound.round_number}</span> to confirm:
+                </label>
+                <Input
+                  type="text"
+                  placeholder={`RESET ROUND ${targetResetRound.round_number}`}
+                  value={resetRoundTypedConfirm}
+                  onChange={(e) => setResetRoundTypedConfirm(e.target.value)}
+                  className="bg-slate-950 border-slate-800 text-xs font-mono"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 pt-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setResetRoundModalOpen(false)}
+                disabled={isResettingRound}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={handleResetRoundDecisions}
+                disabled={
+                  isResettingRound ||
+                  resetRoundReason.trim().length < 5 ||
+                  resetRoundTypedConfirm.trim() !== `RESET ROUND ${targetResetRound.round_number}`
+                }
+                className="bg-rose-600 hover:bg-rose-500 text-white font-semibold"
+              >
+                {isResettingRound ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                    Resetting Decisions...
+                  </>
+                ) : (
+                  <>
+                    <RotateCcw className="h-4 w-4 mr-2" />
+                    Confirm Reset Decisions
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* 5. RESET ENTIRE TOURNAMENT MODAL */}
+      <Modal
+        isOpen={resetTournamentModalOpen}
+        onClose={() => setResetTournamentModalOpen(false)}
+        title="Reset Entire Tournament"
+        description="Permanently restore all 5 rounds and tournament simulation state back to zero for a fresh rehearsal or live competition start."
+        maxWidth="xl"
+      >
+        <div className="space-y-4">
+          {resetTournamentError && (
+            <Alert variant="error">
+              <AlertTriangle className="h-4 w-4" />
+              <span className="text-xs">{resetTournamentError}</span>
+            </Alert>
+          )}
+
+          <div className="bg-rose-950/30 border border-rose-900/60 rounded-xl p-3.5 space-y-2 text-xs">
+            <div className="font-semibold text-rose-400 flex items-center gap-1.5">
+              <AlertTriangle className="h-4 w-4 shrink-0" />
+              <span>Destructive Operation: Full Simulation Baseline Reset</span>
+            </div>
+            <p className="text-slate-300 leading-relaxed">
+              This action resets all 5 rounds back to <span className="font-semibold text-white">DRAFT</span> status, wipes all computed financial snapshots, double-entry cash ledgers, equity transactions, and decision records.
+            </p>
+            <div className="grid grid-cols-2 gap-2 pt-2 border-t border-rose-900/40 text-[11px]">
+              <div>
+                <span className="text-slate-400 block">Registered Teams:</span>
+                <span className="font-mono font-bold text-emerald-400">
+                  100% PRESERVED ({data?.eligibleCompaniesCount || data?.rounds?.[0]?.decisionStats?.totalEligible || 0} teams)
+                </span>
+              </div>
+              <div>
+                <span className="text-slate-400 block">Participant Rosters:</span>
+                <span className="font-mono font-bold text-emerald-400">100% PRESERVED</span>
+              </div>
+              <div>
+                <span className="text-slate-400 block">Post-Reset Cash Baseline:</span>
+                <span className="font-mono font-bold text-white">$1,000,000 per team</span>
+              </div>
+              <div>
+                <span className="text-slate-400 block">Post-Reset Valuation:</span>
+                <span className="font-mono font-bold text-white">$200,000 (100% equity)</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            <div>
+              <label className="text-xs font-semibold text-slate-300 block mb-1">
+                Mandatory Audit Reason (min 5 chars):
+              </label>
+              <textarea
+                rows={2}
+                placeholder="e.g., Rehearsal run complete. Resetting simulator back to baseline for official tournament competition."
+                value={resetTournamentReason}
+                onChange={(e) => setResetTournamentReason(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+              />
+            </div>
+
+            {data?.rounds?.some(r => r.status === 'published') && (
+              <div className="bg-slate-950 border border-amber-900/60 rounded-lg p-2.5">
+                <label className="flex items-start gap-2 cursor-pointer text-xs text-amber-300">
+                  <input
+                    type="checkbox"
+                    checked={resetTournamentConfirmPublished}
+                    onChange={(e) => setResetTournamentConfirmPublished(e.target.checked)}
+                    className="mt-0.5 rounded text-rose-600 focus:ring-rose-500"
+                  />
+                  <span>
+                    I understand that this tournament contains published results. I explicitly authorize purging published competition history.
+                  </span>
+                </label>
+              </div>
+            )}
+
+            <div>
+              <label className="text-xs font-semibold text-slate-300 block mb-1">
+                Type <span className="font-mono text-rose-400 select-all font-bold">RESET TOURNAMENT</span> to confirm:
+              </label>
+              <Input
+                type="text"
+                placeholder="RESET TOURNAMENT"
+                value={resetTournamentTypedConfirm}
+                onChange={(e) => setResetTournamentTypedConfirm(e.target.value)}
+                className="bg-slate-950 border-slate-800 text-xs font-mono"
+              />
+            </div>
+          </div>
+
+          <div className="flex justify-end gap-3 pt-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setResetTournamentModalOpen(false)}
+              disabled={isResettingTournament}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleResetEntireTournament}
+              disabled={
+                isResettingTournament ||
+                resetTournamentReason.trim().length < 5 ||
+                resetTournamentTypedConfirm.trim() !== 'RESET TOURNAMENT' ||
+                (Boolean(data?.rounds?.some(r => r.status === 'published')) && !resetTournamentConfirmPublished)
+              }
+              className="bg-rose-600 hover:bg-rose-500 text-white font-semibold"
+            >
+              {isResettingTournament ? (
+                <>
+                  <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                  Resetting Tournament...
+                </>
+              ) : (
+                <>
+                  <Trash2 className="h-4 w-4 mr-2" />
+                  Confirm Full Tournament Reset
+                </>
+              )}
+            </Button>
+          </div>
+        </div>
       </Modal>
     </AdminShell>
   );

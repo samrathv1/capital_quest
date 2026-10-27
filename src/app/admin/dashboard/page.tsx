@@ -261,12 +261,11 @@ export default function AdminDashboardPage() {
             </Link>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {[
-              { code: 'CLEAN', name: 'CleanTech Hardware', baseDemand: '10,000 units', cogs: '$200.00' },
-              { code: 'HEALTH', name: 'HealthTech Devices', baseDemand: '8,000 units', cogs: '$250.00' },
-              { code: 'SAAS', name: 'Enterprise SaaS', baseDemand: '12,000 licenses', cogs: '$40.00' },
-              { code: 'D2C', name: 'D2C Consumer Goods', baseDemand: '25,000 units', cogs: '$30.00' },
+              { code: 'D2C', name: 'D2C Consumer Goods', baseDemand: '120,000 units', cogs: '$28.00', priceRange: '$40 - $110' },
+              { code: 'HEALTH', name: 'HealthTech & BioDevices', baseDemand: '12,000 units', cogs: '$1,100.00', priceRange: '$1,600 - $3,800' },
+              { code: 'SAAS', name: 'Enterprise SaaS & AI', baseDemand: '60,000 units', cogs: '$25.00', priceRange: '$200 - $600' },
             ].map(domain => (
               <div
                 key={domain.code}
@@ -278,6 +277,7 @@ export default function AdminDashboardPage() {
                 </div>
                 <div className="font-semibold text-white text-sm">{domain.name}</div>
                 <div className="text-xs text-slate-400">Base Demand: {domain.baseDemand}</div>
+                <div className="text-[11px] text-indigo-400">Price Window: {domain.priceRange}</div>
               </div>
             ))}
           </div>

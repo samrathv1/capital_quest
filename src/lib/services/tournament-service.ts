@@ -2,7 +2,7 @@ import { SupabaseClient } from '@supabase/supabase-js';
 import { AppError } from '@/lib/errors/app-error';
 import { DecisionSubmitInput, VoidRoundInput, AdminDecisionConfirmInput } from '@/lib/validation/api-schemas';
 import { D } from '@/engine/math/precision';
-import { assertOrganizerPoliciesApproved, syncOrganizerPolicyApprovals } from './organizer-approvals';
+import { assertOrganizerPoliciesApproved, syncOrganizerPolicyApprovals, resetOrganizerPolicyGates } from './organizer-approvals';
 
 interface PresentationEventRecord {
   id: string;
@@ -348,13 +348,18 @@ export class TournamentService {
     return data;
   }
 
-  async getDomains(eventId: string) {
-    const { data, error } = await this.supabase
+  async getDomains(eventId: string, activeOnly: boolean = true) {
+    let query = this.supabase
       .from('domains')
       .select('*')
       .eq('event_id', eventId)
       .order('code');
 
+    if (activeOnly) {
+      query = query.neq('is_active', false);
+    }
+
+    const { data, error } = await query;
     if (error) throw new AppError('NOT_FOUND', `Failed to load domains: ${error.message}`, 500);
     return data;
   }
@@ -672,6 +677,368 @@ export class TournamentService {
     }
 
     return data;
+  }
+
+  async resetRoundDecisions(
+    roundId: string,
+    actorId: string,
+    reason: string,
+    targetStatus: 'draft' | 'open' = 'draft'
+  ) {
+    if (!reason || reason.trim().length < 5) {
+      throw new AppError('VALIDATION_ERROR', 'A structured audit reason of at least 5 characters is required.', 400);
+    }
+
+    // 1. Try atomic database transaction RPC first
+    try {
+      const { data: rpcData, error: rpcErr } = await this.supabase.rpc('fn_reset_round_decisions', {
+        p_round_id: roundId,
+        p_actor_id: actorId,
+        p_reason: reason,
+        p_target_status: targetStatus,
+      });
+
+      if (!rpcErr && rpcData) {
+        return rpcData;
+      }
+
+      if (rpcErr) {
+        if (rpcErr.message?.includes('not found') || rpcErr.code === 'P0002') {
+          throw new AppError('NOT_FOUND', `Round not found: ${roundId}`, 404);
+        }
+        if (rpcErr.message?.includes('Access denied') || rpcErr.code === '42501') {
+          throw new AppError('FORBIDDEN', rpcErr.message, 403);
+        }
+        if (rpcErr.code === '23503' || rpcErr.message?.includes('Cannot reset round')) {
+          throw new AppError('CASCADE_GUARD_VIOLATION', rpcErr.message, 409);
+        }
+        const isFnMissing = rpcErr.message?.includes('function') && rpcErr.message?.includes('does not exist');
+        if (!isFnMissing) {
+          throw new AppError('VALIDATION_ERROR', `Failed to reset round decisions: ${rpcErr.message}`, 400);
+        }
+      }
+    } catch (rpcCatchErr) {
+      if (rpcCatchErr instanceof AppError) throw rpcCatchErr;
+      // Fall through to JS-level fallback
+    }
+
+    // 2. JS-level fallback
+    const round = await this.getRoundById(roundId);
+    if (['simulated', 'reviewed', 'published'].includes(round.status)) {
+      throw new AppError(
+        'CASCADE_GUARD_VIOLATION',
+        `Cannot reset round ${round.round_number}: Round has already been simulated, reviewed, or published. Tournament history is protected.`,
+        409
+      );
+    }
+
+    // Check simulation runs
+    const { count: simCount } = await this.supabase
+      .from('simulation_runs')
+      .select('*', { count: 'exact', head: true })
+      .eq('round_id', roundId);
+
+    if (simCount && simCount > 0) {
+      throw new AppError('CASCADE_GUARD_VIOLATION', `Cannot reset round: Simulation runs exist for this round.`, 409);
+    }
+
+    // Count decisions before delete
+    const { count: decisionCount } = await this.supabase
+      .from('decisions')
+      .select('*', { count: 'exact', head: true })
+      .eq('round_id', roundId);
+
+    // Delete decisions
+    const { error: delErr } = await this.supabase
+      .from('decisions')
+      .delete()
+      .eq('round_id', roundId);
+
+    if (delErr) {
+      throw new AppError('VALIDATION_ERROR', `Failed to delete round decisions: ${delErr.message}`, 500);
+    }
+
+    // Update round status & timestamps
+    const newStatus = targetStatus === 'open' ? 'open' : 'draft';
+    const updatePayload: Record<string, unknown> = {
+      status: newStatus,
+      locked_at: null,
+      simulated_at: null,
+      published_at: null,
+    };
+    if (newStatus === 'draft') {
+      updatePayload.opened_at = null;
+    }
+
+    const { error: updateErr } = await this.supabase
+      .from('rounds')
+      .update(updatePayload)
+      .eq('id', roundId);
+
+    if (updateErr) {
+      throw new AppError('VALIDATION_ERROR', `Failed to update round status: ${updateErr.message}`, 500);
+    }
+
+    // Count preserved teams
+    const { count: teamCount } = await this.supabase
+      .from('teams')
+      .select('*', { count: 'exact', head: true })
+      .eq('event_id', round.event_id);
+
+    // Record audit
+    await this.recordAuditLog({
+      actorId,
+      action: 'RESET_ROUND_DECISIONS',
+      entityName: 'rounds',
+      entityId: roundId,
+      beforeState: { status: round.status, decisionsCount: decisionCount || 0 },
+      afterState: { status: newStatus, decisionsCleared: decisionCount || 0, teamsPreserved: teamCount || 0, reason },
+    });
+
+    return {
+      success: true,
+      round_id: roundId,
+      round_number: round.round_number,
+      previous_status: round.status,
+      new_status: newStatus,
+      decisions_cleared: decisionCount || 0,
+      teams_preserved: teamCount || 0,
+      reason,
+    };
+  }
+
+  async createTournamentBackup(eventId: string) {
+    const { data: event } = await this.supabase.from('events').select('*').eq('id', eventId).single();
+    const { data: rounds } = await this.supabase.from('rounds').select('*').eq('event_id', eventId).order('round_number');
+    const { data: teams } = await this.supabase.from('teams').select('*').eq('event_id', eventId).order('team_code');
+
+    const teamIds = (teams || []).map(t => t.id);
+    const roundIds = (rounds || []).map(r => r.id);
+
+    let members: unknown[] = [];
+    if (teamIds.length > 0) {
+      const { data: m } = await this.supabase.from('team_members').select('*').in('team_id', teamIds);
+      members = m || [];
+    }
+
+    let decisions: unknown[] = [];
+    let simRuns: unknown[] = [];
+    let snapshots: unknown[] = [];
+    let equity: unknown[] = [];
+
+    if (roundIds.length > 0) {
+      const { data: d } = await this.supabase.from('decisions').select('*').in('round_id', roundIds);
+      decisions = d || [];
+      const { data: sr } = await this.supabase.from('simulation_runs').select('*').in('round_id', roundIds);
+      simRuns = sr || [];
+      const { data: cs } = await this.supabase.from('company_snapshots').select('*').in('round_id', roundIds);
+      snapshots = cs || [];
+      const { data: eq } = await this.supabase.from('equity_transactions').select('*').in('round_id', roundIds);
+      equity = eq || [];
+    }
+
+    const { data: ledger } = await this.supabase.from('financial_ledger').select('*').eq('event_id', eventId);
+    const { data: presentation } = await this.supabase.from('presentation_state').select('*').eq('event_id', eventId);
+
+    return {
+      backupTimestamp: new Date().toISOString(),
+      eventId,
+      event,
+      rounds,
+      teams,
+      teamMembers: members,
+      decisions,
+      simulationRuns: simRuns,
+      companySnapshots: snapshots,
+      financialLedger: ledger || [],
+      equityTransactions: equity,
+      presentationState: presentation || [],
+    };
+  }
+
+  async resetEntireTournament(
+    eventId: string,
+    actorId: string,
+    reason: string,
+    confirmPublished: boolean = false
+  ) {
+    if (!reason || reason.trim().length < 5) {
+      throw new AppError('VALIDATION_ERROR', 'A structured audit reason of at least 5 characters is required.', 400);
+    }
+
+    // 1. Try atomic database transaction RPC first
+    try {
+      const { data: rpcData, error: rpcErr } = await this.supabase.rpc('fn_reset_entire_tournament', {
+        p_event_id: eventId,
+        p_actor_id: actorId,
+        p_reason: reason,
+        p_confirm_published: confirmPublished,
+      });
+
+      if (!rpcErr && rpcData) {
+        resetOrganizerPolicyGates(eventId);
+        return rpcData;
+      }
+
+      if (rpcErr) {
+        if (rpcErr.message?.includes('not found') || rpcErr.code === 'P0002') {
+          throw new AppError('NOT_FOUND', `Event not found: ${eventId}`, 404);
+        }
+        if (rpcErr.message?.includes('Access denied') || rpcErr.code === '42501') {
+          throw new AppError('FORBIDDEN', rpcErr.message, 403);
+        }
+        if (rpcErr.code === '55000' || rpcErr.message?.includes('Cannot reset tournament')) {
+          throw new AppError('CASCADE_GUARD_VIOLATION', rpcErr.message, 409);
+        }
+        const isFnMissing = rpcErr.message?.includes('function') && rpcErr.message?.includes('does not exist');
+        if (!isFnMissing) {
+          throw new AppError('VALIDATION_ERROR', `Failed to reset tournament: ${rpcErr.message}`, 400);
+        }
+      }
+    } catch (rpcCatchErr) {
+      if (rpcCatchErr instanceof AppError) throw rpcCatchErr;
+      // Fall through to JS-level fallback
+    }
+
+    // 2. JS-level fallback with identical safety rules
+    const { data: event, error: eventErr } = await this.supabase
+      .from('events')
+      .select('*')
+      .eq('id', eventId)
+      .single();
+
+    if (eventErr || !event) {
+      throw new AppError('NOT_FOUND', `Event not found: ${eventId}`, 404);
+    }
+
+    const { data: rounds } = await this.supabase
+      .from('rounds')
+      .select('*')
+      .eq('event_id', eventId);
+
+    const hasPublished = (rounds || []).some(r => r.status === 'published');
+    if ((event.status === 'completed' || hasPublished) && !confirmPublished) {
+      throw new AppError(
+        'CASCADE_GUARD_VIOLATION',
+        'Cannot reset tournament: This event has published rounds or is marked completed. Explicit confirmation is required to reset published tournament history.',
+        409
+      );
+    }
+
+    const roundIds = (rounds || []).map(r => r.id);
+
+    // Count records before cleanup
+    const { count: decCount } = await this.supabase
+      .from('decisions')
+      .select('*', { count: 'exact', head: true })
+      .in('round_id', roundIds);
+
+    const { count: simCount } = await this.supabase
+      .from('simulation_runs')
+      .select('*', { count: 'exact', head: true })
+      .in('round_id', roundIds);
+
+    const { count: snapCount } = await this.supabase
+      .from('company_snapshots')
+      .select('*', { count: 'exact', head: true })
+      .in('round_id', roundIds);
+
+    const { count: ledgerCount } = await this.supabase
+      .from('financial_ledger')
+      .select('*', { count: 'exact', head: true })
+      .eq('event_id', eventId);
+
+    const { count: eqCount } = await this.supabase
+      .from('equity_transactions')
+      .select('*', { count: 'exact', head: true })
+      .in('round_id', roundIds);
+
+    // Clean up dependent records in sequence
+    await this.supabase.from('financial_ledger').delete().eq('event_id', eventId);
+    if (roundIds.length > 0) {
+      await this.supabase.from('equity_transactions').delete().in('round_id', roundIds);
+      await this.supabase.from('company_snapshots').delete().in('round_id', roundIds);
+      await this.supabase.from('simulation_runs').delete().in('round_id', roundIds);
+      await this.supabase.from('decisions').delete().in('round_id', roundIds);
+    }
+
+    // Reset rounds to draft
+    await this.supabase
+      .from('rounds')
+      .update({
+        status: 'draft',
+        opened_at: null,
+        locked_at: null,
+        simulated_at: null,
+        published_at: null,
+      })
+      .eq('event_id', eventId);
+
+    // Reset event status to setup and active_round_number to 0
+    await this.supabase
+      .from('events')
+      .update({
+        status: 'setup',
+        active_round_number: 0,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', eventId);
+
+    // Reset presentation state
+    await this.supabase
+      .from('presentation_state')
+      .update({
+        ceremony_stage: 'waiting',
+        mode: 'standings',
+        is_winner_revealed: false,
+        selected_round_number: 1,
+        domain_filter: 'ALL',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('event_id', eventId);
+
+    // Reset policy gates
+    resetOrganizerPolicyGates(eventId);
+
+    const { count: teamCount } = await this.supabase
+      .from('teams')
+      .select('*', { count: 'exact', head: true })
+      .eq('event_id', eventId);
+
+    // Record audit
+    await this.recordAuditLog({
+      actorId,
+      action: 'RESET_ENTIRE_TOURNAMENT',
+      entityName: 'events',
+      entityId: eventId,
+      beforeState: { status: event.status, active_round_number: event.active_round_number },
+      afterState: {
+        status: 'setup',
+        active_round_number: 0,
+        teams_preserved: teamCount || 0,
+        decisions_cleared: decCount || 0,
+        simulations_cleared: simCount || 0,
+        snapshots_cleared: snapCount || 0,
+        ledger_entries_cleared: ledgerCount || 0,
+        equity_cleared: eqCount || 0,
+        reason,
+      },
+    });
+
+    return {
+      success: true,
+      event_id: eventId,
+      event_name: event.name,
+      new_event_status: 'setup',
+      active_round_number: 0,
+      teams_preserved: teamCount || 0,
+      decisions_cleared: decCount || 0,
+      simulations_cleared: simCount || 0,
+      snapshots_cleared: snapCount || 0,
+      ledger_entries_cleared: ledgerCount || 0,
+      equity_transactions_cleared: eqCount || 0,
+      reason,
+    };
   }
 
   // 3. DECISION OPERATIONS
@@ -1519,8 +1886,8 @@ export class TournamentService {
         companyName: teamObj?.company_name ?? 'Virtual Enterprise',
         tableStation: teamObj?.table_station ?? null,
         domainId: teamObj?.domain_id,
-        domainCode: teamObj?.domains?.code ?? 'CLEANTECH',
-        domainName: teamObj?.domains?.name ?? 'CleanTech',
+        domainCode: teamObj?.domains?.code ?? 'D2C',
+        domainName: teamObj?.domains?.name ?? 'D2C Consumer Goods',
         valuation: Number(row.company_valuation),
         retainedEquityPct: Number(row.retained_equity_pct),
         equityAdjustedScore: Number(row.equity_adjusted_score),
@@ -1626,8 +1993,8 @@ export class TournamentService {
           companyName: team.company_name,
           tableStation: team.table_station,
           domainId: team.domain_id,
-          domainName: domain?.name ?? 'CleanTech',
-          domainCode: domain?.code ?? 'CLEANTECH',
+          domainName: domain?.name ?? 'D2C Consumer Goods',
+          domainCode: domain?.code ?? 'D2C',
           eventId: team.event_id,
           eventName: event?.name ?? 'Capital Quest',
         },
@@ -1844,8 +2211,8 @@ export class TournamentService {
         companyName: team.company_name,
         tableStation: team.table_station,
         domainId: team.domain_id,
-        domainName: domain?.name ?? 'CleanTech',
-        domainCode: domain?.code ?? 'CLEANTECH',
+        domainName: domain?.name ?? 'D2C Consumer Goods',
+        domainCode: domain?.code ?? 'D2C',
         eventId: team.event_id,
         eventName: event?.name ?? 'Capital Quest',
       },
@@ -2372,11 +2739,17 @@ export class TournamentService {
 
     const { data: teams } = await this.supabase
       .from('teams')
-      .select('id, team_code, is_disqualified')
+      .select('id, team_code, company_name, domain_id, is_disqualified, domains(id, code, name, is_active)')
       .eq('event_id', eventId)
       .eq('is_disqualified', false);
 
     const eligibleCount = (teams || []).length;
+
+    // Detect if any registered team has an inactive domain
+    const inactiveTeams = (teams || []).filter(t => {
+      const d = t.domains as unknown as { is_active?: boolean; name?: string } | null;
+      return d?.is_active === false;
+    });
 
     // Fetch decisions for all rounds
     const { data: allDecisions } = await this.supabase
@@ -2433,6 +2806,12 @@ export class TournamentService {
 
       // Compute state transition blockers
       const blockers: string[] = [];
+
+      // Check inactive domain blocker
+      if (inactiveTeams.length > 0) {
+        blockers.push(`${inactiveTeams.length} team(s) assigned to inactive domain (${inactiveTeams.map(t => t.company_name).join(', ')}). Domain reassignment required before simulation.`);
+      }
+
       if (r.status === 'draft') {
         if (r.round_number > 1) {
           const prev = (rounds || []).find(pr => pr.round_number === r.round_number - 1);
@@ -2459,12 +2838,14 @@ export class TournamentService {
       } else if (r.status === 'open') {
         allowedTransitions.push('lock');
       } else if (r.status === 'locked') {
-        if (policyApproval.approved) allowedTransitions.push('simulate');
+        if (policyApproval.approved && blockers.length === 0) allowedTransitions.push('simulate');
       } else if (r.status === 'simulated') {
         allowedTransitions.push('review', 'void');
       } else if (r.status === 'reviewed') {
         allowedTransitions.push('publish', 'void');
       }
+
+      const canReset = (r.status === 'draft' || r.status === 'open' || r.status === 'locked') && !latestRun;
 
       const roundMarketEvents = (marketEvents || [])
         .filter(me => me.activation_round === r.round_number)
@@ -2522,6 +2903,7 @@ export class TournamentService {
         canReview: r.status === 'simulated',
         canPublish: r.status === 'reviewed',
         canVoid: r.status === 'simulated' || r.status === 'reviewed',
+        canReset,
       };
     });
 
@@ -2604,7 +2986,7 @@ export class TournamentService {
       eventId: data.event_id,
       mode: (data.mode || data.display_mode || 'standings') as 'standings' | 'domain' | 'highlights' | 'ceremony',
       selectedRoundNumber: data.selected_round_number ?? 1,
-      domainFilter: (data.domain_filter || 'ALL') as 'ALL' | 'CLEANTECH' | 'HEALTHTECH' | 'SAAS' | 'D2C',
+      domainFilter: (data.domain_filter || 'ALL') as 'ALL' | 'D2C' | 'HEALTH' | 'HEALTHTECH' | 'SAAS' | 'CLEANTECH',
       ceremonyStage: (data.ceremony_stage || 'waiting') as 'waiting' | 'reveal_third' | 'reveal_second' | 'reveal_first' | 'podium',
       isWinnerRevealed,
       updatedAt: data.updated_at,
@@ -3044,5 +3426,28 @@ export class TournamentService {
       .maybeSingle();
 
     return data?.id;
+  }
+
+  private async recordAuditLog(input: {
+    actorId?: string;
+    action: string;
+    entityName: string;
+    entityId: string;
+    beforeState?: unknown;
+    afterState?: unknown;
+  }): Promise<void> {
+    try {
+      await this.supabase.from('audit_logs').insert({
+        actor_id: input.actorId || null,
+        action: input.action,
+        entity_name: input.entityName,
+        entity_id: input.entityId,
+        before_state: input.beforeState ? JSON.parse(JSON.stringify(input.beforeState)) : null,
+        after_state: input.afterState ? JSON.parse(JSON.stringify(input.afterState)) : null,
+        created_at: new Date().toISOString(),
+      });
+    } catch {
+      // Non-fatal fallback for audit logging in mock/isolated unit test environments
+    }
   }
 }

@@ -74,10 +74,9 @@ const CEREMONY_STAGES: {
 
 const DOMAIN_OPTIONS = [
   { id: 'ALL', label: 'All Domains' },
-  { id: 'cleantech', label: 'CleanTech Hardware' },
-  { id: 'healthtech', label: 'HealthTech Devices' },
-  { id: 'saas', label: 'Enterprise SaaS' },
   { id: 'd2c', label: 'D2C Consumer Goods' },
+  { id: 'healthtech', label: 'HealthTech & BioDevices' },
+  { id: 'saas', label: 'Enterprise SaaS & AI' },
 ];
 
 export default function AdminPresentationPage() {

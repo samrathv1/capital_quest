@@ -82,13 +82,13 @@ BEGIN
             v_admin_id
         );
 
-        -- 3. DOMAINS (4 Core Archetypes)
-        INSERT INTO public.domains (id, event_id, code, name, description, base_demand, benchmark_price, min_allowed_price, max_allowed_price, base_unit_cogs, rd_elasticity, mkt_elasticity, price_elasticity)
+        -- 3. DOMAINS (3 Active Approved Archetypes + 1 Archived Legacy Archetype)
+        INSERT INTO public.domains (id, event_id, code, name, description, is_active, base_demand, benchmark_price, min_allowed_price, max_allowed_price, base_unit_cogs, rd_elasticity, mkt_elasticity, price_elasticity)
         VALUES 
-            (v_clean_id, v_event_id, 'CLEAN', 'CleanTech Hardware', 'Grid batteries & solar hardware solutions', 10000, 1000.00, 500.00, 2000.00, 200.00, 0.75, 0.75, 1.20),
-            (v_health_id, v_event_id, 'HEALTH', 'HealthTech Devices', 'Point-of-care diagnostics & wearable medical devices', 8000, 1200.00, 600.00, 2500.00, 250.00, 0.85, 0.65, 1.10),
-            (v_saas_id, v_event_id, 'SAAS', 'Enterprise SaaS', 'B2B workflow automation & analytics platforms', 12000, 200.00, 80.00, 500.00, 40.00, 0.80, 0.80, 1.30),
-            (v_d2c_id, v_event_id, 'D2C', 'D2C Consumer Goods', 'Eco-friendly consumer lifestyle products', 25000, 150.00, 50.00, 350.00, 30.00, 0.60, 0.90, 1.50);
+            (v_clean_id, v_event_id, 'CLEAN', 'CleanTech Hardware', 'Grid batteries & solar hardware solutions (Archived legacy domain)', false, 10000, 1000.00, 500.00, 2000.00, 200.00, 0.75, 0.75, 1.20),
+            (v_health_id, v_event_id, 'HEALTH', 'HealthTech Devices', 'Point-of-care diagnostics & wearable medical devices', true, 12000, 2500.00, 1600.00, 3800.00, 1100.00, 1.10, 0.50, 0.85),
+            (v_saas_id, v_event_id, 'SAAS', 'Enterprise SaaS & AI', 'B2B workflow automation & analytics platforms', true, 60000, 350.00, 200.00, 600.00, 25.00, 0.75, 0.85, 1.45),
+            (v_d2c_id, v_event_id, 'D2C', 'D2C Consumer Goods', 'Eco-friendly consumer lifestyle products', true, 120000, 65.00, 40.00, 110.00, 28.00, 0.45, 1.15, 1.80);
 
         -- 4. ROUNDS (Round 1 OPEN, Rounds 2-5 DRAFT)
         INSERT INTO public.rounds (id, event_id, round_number, type, status, opened_at)

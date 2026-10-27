@@ -84,23 +84,80 @@ export const DOMAIN_ARCHETYPES: Record<string, DomainConfig> = {
   },
 };
 
+export const ACTIVE_DOMAIN_CODES = ['d2c', 'healthtech', 'saas'] as const;
+export type ActiveDomainCode = (typeof ACTIVE_DOMAIN_CODES)[number];
+
+export const CANONICAL_ACTIVE_DOMAINS = [
+  {
+    code: 'D2C',
+    normalizedCode: 'd2c',
+    name: 'D2C Consumer Goods',
+    benchmarkPrice: 65,
+    minPrice: 40,
+    maxPrice: 110,
+    baseCogs: 28,
+    baseDemand: 120000,
+  },
+  {
+    code: 'HEALTH',
+    normalizedCode: 'healthtech',
+    name: 'HealthTech & BioDevices',
+    benchmarkPrice: 2500,
+    minPrice: 1600,
+    maxPrice: 3800,
+    baseCogs: 1100,
+    baseDemand: 12000,
+  },
+  {
+    code: 'SAAS',
+    normalizedCode: 'saas',
+    name: 'Enterprise SaaS & AI',
+    benchmarkPrice: 350,
+    minPrice: 200,
+    maxPrice: 600,
+    baseCogs: 25,
+    baseDemand: 60000,
+  },
+] as const;
+
+/**
+ * Checks whether a given domain code represents an active competition domain.
+ */
+export function isActiveDomain(code: string): boolean {
+  const normalized = normalizeDomainCode(code);
+  return (ACTIVE_DOMAIN_CODES as readonly string[]).includes(normalized);
+}
+
+/**
+ * Normalizes any domain code or alias to its canonical engine archetype key.
+ */
+export function normalizeDomainCode(code: string): string {
+  const clean = (code || '').toLowerCase().trim();
+  const aliasMap: Record<string, string> = {
+    clean: 'cleantech',
+    cleantech: 'cleantech',
+    'cleantech & hardware': 'cleantech',
+    health: 'healthtech',
+    healthtech: 'healthtech',
+    'healthtech & biodevices': 'healthtech',
+    'healthtech devices': 'healthtech',
+    saas: 'saas',
+    'enterprise saas': 'saas',
+    'enterprise saas & ai': 'saas',
+    d2c: 'd2c',
+    'd2c consumer goods': 'd2c',
+  };
+  return aliasMap[clean] || clean;
+}
+
 /**
  * Retrieves domain configuration by domain code (case-insensitive).
  */
 export function getDomainConfig(code: string): DomainConfig {
-  const normalized = code.toLowerCase().trim();
-  const aliasMap: Record<string, string> = {
-    clean: 'cleantech',
-    cleantech: 'cleantech',
-    health: 'healthtech',
-    healthtech: 'healthtech',
-    saas: 'saas',
-    d2c: 'd2c',
-  };
-  const targetKey = aliasMap[normalized] || normalized;
+  const targetKey = normalizeDomainCode(code);
   const config = DOMAIN_ARCHETYPES[targetKey];
   if (!config) {
-    throw new Error(`Domain configuration not found for code: "${code}". Allowed domains: cleantech, healthtech, saas, d2c.`);
+    throw new Error(`Domain configuration not found for code: "${code}". Allowed domains: cleantech (archived), healthtech, saas, d2c.`);
   }
   return config;
 }

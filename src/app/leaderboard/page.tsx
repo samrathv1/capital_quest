@@ -483,17 +483,22 @@ export default function PublicLeaderboardPage() {
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
               {/* DOMAIN TABS */}
               <div className="flex flex-wrap gap-1 p-1 rounded-xl bg-slate-900 border border-slate-800 text-xs">
-                {['ALL', 'CLEANTECH', 'HEALTHTECH', 'SAAS', 'D2C'].map(d => (
+                {[
+                  { id: 'ALL', label: 'All Domains' },
+                  { id: 'D2C', label: 'D2C' },
+                  { id: 'HEALTHTECH', label: 'HealthTech' },
+                  { id: 'SAAS', label: 'Enterprise SaaS & AI' },
+                ].map(d => (
                   <button
-                    key={d}
-                    onClick={() => setSelectedDomain(d)}
+                    key={d.id}
+                    onClick={() => setSelectedDomain(d.id)}
                     className={`px-3 py-1.5 rounded-lg font-semibold transition-all ${
-                      selectedDomain === d
+                      selectedDomain === d.id
                         ? 'bg-indigo-600 text-white shadow-sm'
                         : 'text-slate-400 hover:text-slate-200'
                     }`}
                   >
-                    {d === 'ALL' ? 'All Domains' : d}
+                    {d.label}
                   </button>
                 ))}
               </div>

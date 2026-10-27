@@ -36,6 +36,17 @@ export const PublishRoundSchema = z.object({
   confirmPublish: z.boolean(),
 });
 
+export const ResetRoundDecisionsSchema = z.object({
+  reason: z.string().min(5, 'A structured audit reason of at least 5 characters is required'),
+  targetStatus: z.enum(['draft', 'open']).default('draft'),
+});
+
+export const ResetEntireTournamentSchema = z.object({
+  reason: z.string().min(5, 'A structured audit reason of at least 5 characters is required'),
+  confirmPhrase: z.literal('RESET TOURNAMENT'),
+  confirmPublished: z.boolean().default(false),
+});
+
 export const OrganizerApprovalSchema = z.object({
   cashValuationPolicyApproved: z.boolean().default(true),
   corporateTaxationApproved: z.boolean().default(true),
@@ -77,3 +88,5 @@ export type TeamRegisterInput = z.infer<typeof TeamRegisterSchema>;
 export type TeamMemberInput = z.infer<typeof TeamMemberSchema>;
 export type UpdatePresentationStateInput = z.infer<typeof UpdatePresentationStateSchema>;
 export type AdminDecisionConfirmInput = z.infer<typeof AdminDecisionConfirmSchema>;
+export type ResetRoundDecisionsInput = z.infer<typeof ResetRoundDecisionsSchema>;
+export type ResetEntireTournamentInput = z.infer<typeof ResetEntireTournamentSchema>;

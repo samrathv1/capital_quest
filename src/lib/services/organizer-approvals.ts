@@ -22,6 +22,13 @@ export interface OrganizerPolicyGates {
 const eventApprovalRegistry = new Map<string, OrganizerPolicyGates>();
 
 /**
+ * Resets organizer policy approvals for an event back to unapproved state.
+ */
+export function resetOrganizerPolicyGates(eventId: string): void {
+  eventApprovalRegistry.delete(eventId);
+}
+
+/**
  * Returns the current organizer policy approval status for an event.
  */
 export function getOrganizerPolicyGates(eventId: string): OrganizerPolicyGates {
@@ -137,7 +144,7 @@ export async function syncOrganizerPolicyApprovals(
     try {
       const { data: audit } = await supabaseClient
         .from('audit_logs')
-        .select('after_state')
+        .select('created_at, after_state')
         .eq('entity_name', 'events')
         .eq('entity_id', eventId)
         .eq('action', 'organizer.policy_approval')
@@ -146,6 +153,23 @@ export async function syncOrganizerPolicyApprovals(
         .maybeSingle();
 
       if (audit?.after_state) {
+        // Check if a full tournament reset occurred after this approval was recorded
+        const { data: resetAudit } = await supabaseClient
+          .from('audit_logs')
+          .select('created_at')
+          .eq('entity_name', 'events')
+          .eq('entity_id', eventId)
+          .eq('action', 'RESET_ENTIRE_TOURNAMENT')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (resetAudit?.created_at && new Date(resetAudit.created_at) > new Date(audit.created_at)) {
+          // Reset occurred after this approval: clear approval gates back to unapproved
+          resetOrganizerPolicyGates(eventId);
+          return getOrganizerPolicyGates(eventId);
+        }
+
         const persisted = audit.after_state as Partial<OrganizerPolicyGates>;
         const current = getOrganizerPolicyGates(eventId);
         const merged: OrganizerPolicyGates = {

@@ -462,7 +462,7 @@ export async function executeSimulationRound(
   // 3. Fetch Teams and Domains
   const { data: teams, error: teamsError } = await supabaseClient
     .from('teams')
-    .select('id, domain_id, team_code, domains(code)')
+    .select('id, domain_id, team_code, domains(id, code, is_active)')
     .eq('event_id', round.event_id)
     .eq('is_disqualified', false);
 
@@ -470,10 +470,25 @@ export async function executeSimulationRound(
     throw new AppError('NOT_FOUND', 'No active teams registered for this event.', 404);
   }
 
+  // Verify no competing team belongs to an inactive domain
+  const inactiveTeams = teams.filter(t => {
+    const d = t.domains as unknown as { is_active?: boolean } | null;
+    return d?.is_active === false;
+  });
+
+  if (inactiveTeams.length > 0) {
+    throw new AppError(
+      'INACTIVE_DOMAIN_ASSIGNED',
+      `Simulation blocked: ${inactiveTeams.length} team(s) (${inactiveTeams.map(t => t.team_code).join(', ')}) are assigned to an inactive business domain. Please reassign them to an active competition domain (D2C, HealthTech, Enterprise SaaS & AI) before simulating.`,
+      422,
+      { inactiveTeams: inactiveTeams.map(t => t.team_code) }
+    );
+  }
+
   const teamDomainMap = new Map<string, string>();
   for (const t of teams) {
     const domainObj = t.domains as unknown as { code?: string } | null;
-    const domainCode = domainObj?.code ?? 'CLEANTECH';
+    const domainCode = domainObj?.code ?? 'D2C';
     teamDomainMap.set(t.id, domainCode.toLowerCase());
   }
 
