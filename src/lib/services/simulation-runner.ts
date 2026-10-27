@@ -11,7 +11,7 @@ import {
   InvestmentChoice,
   TournamentSimulationResult,
 } from '@/engine/types';
-import { DOMAIN_ARCHETYPES, getDomainConfig } from '@/engine/config/domain-archetypes';
+import { DOMAIN_ARCHETYPES, getDomainConfig, isActiveDomain } from '@/engine/config/domain-archetypes';
 import { D, ZERO } from '@/engine/math/precision';
 import { AppError } from '@/lib/errors/app-error';
 import { assertOrganizerPoliciesApproved, syncOrganizerPolicyApprovals } from './organizer-approvals';
@@ -462,7 +462,7 @@ export async function executeSimulationRound(
   // 3. Fetch Teams and Domains
   const { data: teams, error: teamsError } = await supabaseClient
     .from('teams')
-    .select('id, domain_id, team_code, domains(id, code, is_active)')
+    .select('id, domain_id, team_code, domains(id, code)')
     .eq('event_id', round.event_id)
     .eq('is_disqualified', false);
 
@@ -472,8 +472,10 @@ export async function executeSimulationRound(
 
   // Verify no competing team belongs to an inactive domain
   const inactiveTeams = teams.filter(t => {
-    const d = t.domains as unknown as { is_active?: boolean } | null;
-    return d?.is_active === false;
+    const d = t.domains as unknown as { code?: string; is_active?: boolean } | null;
+    if (d?.is_active === false) return true;
+    if (d?.code && !isActiveDomain(d.code)) return true;
+    return false;
   });
 
   if (inactiveTeams.length > 0) {

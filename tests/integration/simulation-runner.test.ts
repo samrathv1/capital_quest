@@ -100,7 +100,7 @@ describe('Phase 2: Transactional Simulation Runner & Organizer Policy Gates', ()
             eq: vi.fn().mockImplementation((col: string) => {
               if (col === 'event_id') return { eq: vi.fn().mockResolvedValue({
                 data: [
-                  { id: 'team-1', domain_id: 'domain-1', team_code: 'CT-01', domains: { code: 'CLEANTECH' } },
+                  { id: 'team-1', domain_id: 'domain-1', team_code: 'SAAS-01', domains: { code: 'SAAS' } },
                 ],
                 error: null,
               }) };
@@ -120,7 +120,7 @@ describe('Phase 2: Transactional Simulation Runner & Organizer Policy Gates', ()
                   marketing_budget: 50000,
                   rd_budget: 30000,
                   production_units: 500,
-                  unit_price: 450,
+                  unit_price: 350,
                   operations_budget: 20000,
                   investment_decision: 'none',
                 },
@@ -135,12 +135,12 @@ describe('Phase 2: Transactional Simulation Runner & Organizer Policy Gates', ()
             eq: vi.fn().mockResolvedValue({
               data: [
                 {
-                  code: 'CLEANTECH',
-                  base_demand: 10000,
-                  benchmark_price: 500,
-                  min_allowed_price: 250,
-                  max_allowed_price: 800,
-                  base_unit_cogs: 180,
+                  code: 'SAAS',
+                  base_demand: 60000,
+                  benchmark_price: 350,
+                  min_allowed_price: 200,
+                  max_allowed_price: 600,
+                  base_unit_cogs: 25,
                 },
               ],
               error: null,
@@ -222,8 +222,8 @@ describe('Phase 2: Transactional Simulation Runner & Organizer Policy Gates', ()
             eq: vi.fn().mockImplementation((col: string) => {
               if (col === 'event_id') return { eq: vi.fn().mockResolvedValue({
                 data: [
-                  { id: 'team-1', team_code: 'CT-01', domains: { code: 'CLEANTECH' } },
-                  { id: 'team-2', team_code: 'CT-02', domains: { code: 'CLEANTECH' } },
+                  { id: 'team-1', team_code: 'SAAS-01', domains: { code: 'SAAS' } },
+                  { id: 'team-2', team_code: 'SAAS-02', domains: { code: 'SAAS' } },
                 ],
                 error: null,
               }) };
@@ -237,7 +237,7 @@ describe('Phase 2: Transactional Simulation Runner & Organizer Policy Gates', ()
             eq: vi.fn().mockResolvedValue({
               // Only team-1 submitted, team-2 is missing!
               data: [
-                { team_id: 'team-1', marketing_budget: 10000, rd_budget: 10000, production_units: 100, unit_price: 400, operations_budget: 5000, investment_decision: 'none' },
+                { team_id: 'team-1', marketing_budget: 10000, rd_budget: 10000, production_units: 100, unit_price: 350, operations_budget: 5000, investment_decision: 'none' },
               ],
               error: null,
             }),
@@ -270,7 +270,7 @@ describe('Phase 2: Transactional Simulation Runner & Organizer Policy Gates', ()
       });
     } catch (err: any) {
       expect(err.code).toBe('MISSING_SUBMISSIONS');
-      expect(err.details.missingTeams).toContain('CT-02');
+      expect(err.details.missingTeams).toContain('SAAS-02');
     }
   });
 });

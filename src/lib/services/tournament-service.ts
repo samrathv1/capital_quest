@@ -1,7 +1,9 @@
+import crypto from 'crypto';
 import { SupabaseClient } from '@supabase/supabase-js';
 import { AppError } from '@/lib/errors/app-error';
 import { DecisionSubmitInput, VoidRoundInput, AdminDecisionConfirmInput } from '@/lib/validation/api-schemas';
 import { D } from '@/engine/math/precision';
+import { isActiveDomain } from '@/engine/config/domain-archetypes';
 import { assertOrganizerPoliciesApproved, syncOrganizerPolicyApprovals, resetOrganizerPolicyGates } from './organizer-approvals';
 
 interface PresentationEventRecord {
@@ -345,22 +347,32 @@ export class TournamentService {
       .maybeSingle();
 
     if (error) throw new AppError('NOT_FOUND', `Failed to load active event: ${error.message}`, 500);
+    if (data && Array.isArray(data.domains)) {
+      data.domains = data.domains.filter((d: { is_active?: boolean; code?: string }) => {
+        if (d.is_active === false) return false;
+        return isActiveDomain(d.code || '');
+      });
+    }
     return data;
   }
 
   async getDomains(eventId: string, activeOnly: boolean = true) {
-    let query = this.supabase
+    const { data, error } = await this.supabase
       .from('domains')
       .select('*')
       .eq('event_id', eventId)
       .order('code');
 
+    if (error) throw new AppError('NOT_FOUND', `Failed to load domains: ${error.message}`, 500);
+    if (!data) return [];
+
     if (activeOnly) {
-      query = query.neq('is_active', false);
+      return data.filter((d: { code: string; is_active?: boolean }) => {
+        if (d.is_active === false) return false;
+        return isActiveDomain(d.code);
+      });
     }
 
-    const { data, error } = await query;
-    if (error) throw new AppError('NOT_FOUND', `Failed to load domains: ${error.message}`, 500);
     return data;
   }
 
@@ -677,9 +689,7 @@ export class TournamentService {
     }
 
     return data;
-  }
-
-  async resetRoundDecisions(
+  }  async resetRoundDecisions(
     roundId: string,
     actorId: string,
     reason: string,
@@ -689,126 +699,61 @@ export class TournamentService {
       throw new AppError('VALIDATION_ERROR', 'A structured audit reason of at least 5 characters is required.', 400);
     }
 
-    // 1. Try atomic database transaction RPC first
-    try {
-      const { data: rpcData, error: rpcErr } = await this.supabase.rpc('fn_reset_round_decisions', {
-        p_round_id: roundId,
-        p_actor_id: actorId,
-        p_reason: reason,
-        p_target_status: targetStatus,
-      });
-
-      if (!rpcErr && rpcData) {
-        return rpcData;
-      }
-
-      if (rpcErr) {
-        if (rpcErr.message?.includes('not found') || rpcErr.code === 'P0002') {
-          throw new AppError('NOT_FOUND', `Round not found: ${roundId}`, 404);
-        }
-        if (rpcErr.message?.includes('Access denied') || rpcErr.code === '42501') {
-          throw new AppError('FORBIDDEN', rpcErr.message, 403);
-        }
-        if (rpcErr.code === '23503' || rpcErr.message?.includes('Cannot reset round')) {
-          throw new AppError('CASCADE_GUARD_VIOLATION', rpcErr.message, 409);
-        }
-        const isFnMissing = rpcErr.message?.includes('function') && rpcErr.message?.includes('does not exist');
-        if (!isFnMissing) {
-          throw new AppError('VALIDATION_ERROR', `Failed to reset round decisions: ${rpcErr.message}`, 400);
-        }
-      }
-    } catch (rpcCatchErr) {
-      if (rpcCatchErr instanceof AppError) throw rpcCatchErr;
-      // Fall through to JS-level fallback
-    }
-
-    // 2. JS-level fallback
-    const round = await this.getRoundById(roundId);
-    if (['simulated', 'reviewed', 'published'].includes(round.status)) {
-      throw new AppError(
-        'CASCADE_GUARD_VIOLATION',
-        `Cannot reset round ${round.round_number}: Round has already been simulated, reviewed, or published. Tournament history is protected.`,
-        409
-      );
-    }
-
-    // Check simulation runs
-    const { count: simCount } = await this.supabase
-      .from('simulation_runs')
-      .select('*', { count: 'exact', head: true })
-      .eq('round_id', roundId);
-
-    if (simCount && simCount > 0) {
-      throw new AppError('CASCADE_GUARD_VIOLATION', `Cannot reset round: Simulation runs exist for this round.`, 409);
-    }
-
-    // Count decisions before delete
-    const { count: decisionCount } = await this.supabase
-      .from('decisions')
-      .select('*', { count: 'exact', head: true })
-      .eq('round_id', roundId);
-
-    // Delete decisions
-    const { error: delErr } = await this.supabase
-      .from('decisions')
-      .delete()
-      .eq('round_id', roundId);
-
-    if (delErr) {
-      throw new AppError('VALIDATION_ERROR', `Failed to delete round decisions: ${delErr.message}`, 500);
-    }
-
-    // Update round status & timestamps
-    const newStatus = targetStatus === 'open' ? 'open' : 'draft';
-    const updatePayload: Record<string, unknown> = {
-      status: newStatus,
-      locked_at: null,
-      simulated_at: null,
-      published_at: null,
-    };
-    if (newStatus === 'draft') {
-      updatePayload.opened_at = null;
-    }
-
-    const { error: updateErr } = await this.supabase
-      .from('rounds')
-      .update(updatePayload)
-      .eq('id', roundId);
-
-    if (updateErr) {
-      throw new AppError('VALIDATION_ERROR', `Failed to update round status: ${updateErr.message}`, 500);
-    }
-
-    // Count preserved teams
-    const { count: teamCount } = await this.supabase
-      .from('teams')
-      .select('*', { count: 'exact', head: true })
-      .eq('event_id', round.event_id);
-
-    // Record audit
-    await this.recordAuditLog({
-      actorId,
-      action: 'RESET_ROUND_DECISIONS',
-      entityName: 'rounds',
-      entityId: roundId,
-      beforeState: { status: round.status, decisionsCount: decisionCount || 0 },
-      afterState: { status: newStatus, decisionsCleared: decisionCount || 0, teamsPreserved: teamCount || 0, reason },
+    const { data: rpcData, error: rpcErr } = await this.supabase.rpc('fn_reset_round_decisions', {
+      p_round_id: roundId,
+      p_actor_id: actorId,
+      p_reason: reason,
+      p_target_status: targetStatus,
     });
 
-    return {
-      success: true,
-      round_id: roundId,
-      round_number: round.round_number,
-      previous_status: round.status,
-      new_status: newStatus,
-      decisions_cleared: decisionCount || 0,
-      teams_preserved: teamCount || 0,
-      reason,
-    };
+    if (rpcErr) {
+      const isFnMissing =
+        (rpcErr.message?.includes('function') && rpcErr.message?.includes('does not exist')) ||
+        rpcErr.code === '42883';
+      if (isFnMissing) {
+        throw new AppError(
+          'DATABASE_ERROR',
+          'Database migration required: PostgreSQL RPC fn_reset_round_decisions is missing or incompatible. Please apply migration 20261027000000_three_domains_and_tournament_resets.sql before resetting round decisions. Destructive HTTP fallbacks are strictly disabled for tournament data safety.',
+          500,
+          rpcErr
+        );
+      }
+      if (rpcErr.message?.includes('not found') || rpcErr.code === 'P0002') {
+        throw new AppError('NOT_FOUND', `Round not found: ${roundId}`, 404);
+      }
+      if (rpcErr.message?.includes('Access denied') || rpcErr.code === '42501') {
+        throw new AppError('FORBIDDEN', rpcErr.message, 403);
+      }
+      if (rpcErr.code === '23503' || rpcErr.message?.includes('Cannot reset round')) {
+        throw new AppError('CASCADE_GUARD_VIOLATION', rpcErr.message, 409);
+      }
+      throw new AppError('VALIDATION_ERROR', `Failed to reset round decisions: ${rpcErr.message}`, 400);
+    }
+
+    if (!rpcData) {
+      throw new AppError('DATABASE_ERROR', 'RPC fn_reset_round_decisions executed but returned no result.', 500);
+    }
+
+    return rpcData;
   }
 
-  async createTournamentBackup(eventId: string) {
-    const { data: event } = await this.supabase.from('events').select('*').eq('id', eventId).single();
+  private canonicalizeJson(obj: unknown): string {
+    if (obj === null || typeof obj !== 'object') {
+      return JSON.stringify(obj);
+    }
+    if (Array.isArray(obj)) {
+      return '[' + obj.map(item => this.canonicalizeJson(item)).join(',') + ']';
+    }
+    const sortedKeys = Object.keys(obj as Record<string, unknown>).sort();
+    return '{' + sortedKeys.map(k => JSON.stringify(k) + ':' + this.canonicalizeJson((obj as Record<string, unknown>)[k])).join(',') + '}';
+  }
+
+  async createDurableTournamentBackup(eventId: string, actorId: string, reason?: string) {
+    const { data: event, error: eventErr } = await this.supabase.from('events').select('*').eq('id', eventId).single();
+    if (eventErr || !event) {
+      throw new AppError('NOT_FOUND', `Event not found: ${eventId}`, 404);
+    }
+
     const { data: rounds } = await this.supabase.from('rounds').select('*').eq('event_id', eventId).order('round_number');
     const { data: teams } = await this.supabase.from('teams').select('*').eq('event_id', eventId).order('team_code');
 
@@ -840,12 +785,25 @@ export class TournamentService {
     const { data: ledger } = await this.supabase.from('financial_ledger').select('*').eq('event_id', eventId);
     const { data: presentation } = await this.supabase.from('presentation_state').select('*').eq('event_id', eventId);
 
-    return {
+    const recordCounts = {
+      roundsCount: (rounds || []).length,
+      teamsCount: (teams || []).length,
+      teamMembersCount: members.length,
+      decisionsCount: decisions.length,
+      simulationRunsCount: simRuns.length,
+      snapshotsCount: snapshots.length,
+      ledgerEntriesCount: (ledger || []).length,
+      equityTxsCount: equity.length,
+    };
+
+    const payload = {
       backupTimestamp: new Date().toISOString(),
       eventId,
+      actorId,
+      reason: reason || 'Pre-reset durable recovery point',
       event,
-      rounds,
-      teams,
+      rounds: rounds || [],
+      teams: teams || [],
       teamMembers: members,
       decisions,
       simulationRuns: simRuns,
@@ -853,191 +811,128 @@ export class TournamentService {
       financialLedger: ledger || [],
       equityTransactions: equity,
       presentationState: presentation || [],
+      recordCounts,
     };
+
+    const checksum = crypto.createHash('sha256').update(this.canonicalizeJson(payload)).digest('hex');
+
+    const { data: backupRecord, error: backupErr } = await this.supabase
+      .from('tournament_backups')
+      .insert({
+        event_id: eventId,
+        created_by: actorId,
+        backup_version: '1.0',
+        checksum,
+        record_counts: recordCounts,
+        payload,
+        is_verified: true,
+      })
+      .select('id, event_id, operation_id, created_at, checksum, record_counts, is_verified')
+      .single();
+
+    if (backupErr || !backupRecord) {
+      throw new AppError(
+        'BACKUP_FAILED',
+        `Failed to store durable recovery point in tournament_backups: ${backupErr?.message || 'Unknown database error'}. Reset aborted to prevent unrecoverable data loss.`,
+        500,
+        backupErr
+      );
+    }
+
+    return {
+      ...backupRecord,
+      backupTimestamp: payload.backupTimestamp,
+      eventId,
+      rounds: payload.rounds,
+      teams: payload.teams,
+      financialLedger: payload.financialLedger,
+    };
+  }
+
+  // Alias for backward compatibility
+  async createTournamentBackup(eventId: string, actorId: string = '00000000-0000-0000-0000-000000000000') {
+    return this.createDurableTournamentBackup(eventId, actorId);
+  }
+
+  async restoreTournamentFromBackup(backupId: string, actorId: string) {
+    const { data: rpcData, error: rpcErr } = await this.supabase.rpc('fn_restore_tournament_from_backup', {
+      p_backup_id: backupId,
+      p_actor_id: actorId,
+    });
+
+    if (rpcErr) {
+      throw new AppError(
+        'DATABASE_ERROR',
+        `Failed to restore tournament from backup ${backupId}: ${rpcErr.message}`,
+        500,
+        rpcErr
+      );
+    }
+
+    return rpcData;
   }
 
   async resetEntireTournament(
     eventId: string,
     actorId: string,
     reason: string,
-    confirmPublished: boolean = false
+    confirmPublished: boolean = false,
+    existingBackupId?: string
   ) {
     if (!reason || reason.trim().length < 5) {
       throw new AppError('VALIDATION_ERROR', 'A structured audit reason of at least 5 characters is required.', 400);
     }
 
-    // 1. Try atomic database transaction RPC first
-    try {
-      const { data: rpcData, error: rpcErr } = await this.supabase.rpc('fn_reset_entire_tournament', {
-        p_event_id: eventId,
-        p_actor_id: actorId,
-        p_reason: reason,
-        p_confirm_published: confirmPublished,
-      });
-
-      if (!rpcErr && rpcData) {
-        resetOrganizerPolicyGates(eventId);
-        return rpcData;
-      }
-
-      if (rpcErr) {
-        if (rpcErr.message?.includes('not found') || rpcErr.code === 'P0002') {
-          throw new AppError('NOT_FOUND', `Event not found: ${eventId}`, 404);
-        }
-        if (rpcErr.message?.includes('Access denied') || rpcErr.code === '42501') {
-          throw new AppError('FORBIDDEN', rpcErr.message, 403);
-        }
-        if (rpcErr.code === '55000' || rpcErr.message?.includes('Cannot reset tournament')) {
-          throw new AppError('CASCADE_GUARD_VIOLATION', rpcErr.message, 409);
-        }
-        const isFnMissing = rpcErr.message?.includes('function') && rpcErr.message?.includes('does not exist');
-        if (!isFnMissing) {
-          throw new AppError('VALIDATION_ERROR', `Failed to reset tournament: ${rpcErr.message}`, 400);
-        }
-      }
-    } catch (rpcCatchErr) {
-      if (rpcCatchErr instanceof AppError) throw rpcCatchErr;
-      // Fall through to JS-level fallback
+    // 1. Ensure durable backup exists before destructive operation
+    let backupId = existingBackupId;
+    if (!backupId) {
+      const backup = await this.createDurableTournamentBackup(eventId, actorId, reason);
+      backupId = backup.id;
     }
 
-    // 2. JS-level fallback with identical safety rules
-    const { data: event, error: eventErr } = await this.supabase
-      .from('events')
-      .select('*')
-      .eq('id', eventId)
-      .single();
-
-    if (eventErr || !event) {
-      throw new AppError('NOT_FOUND', `Event not found: ${eventId}`, 404);
-    }
-
-    const { data: rounds } = await this.supabase
-      .from('rounds')
-      .select('*')
-      .eq('event_id', eventId);
-
-    const hasPublished = (rounds || []).some(r => r.status === 'published');
-    if ((event.status === 'completed' || hasPublished) && !confirmPublished) {
-      throw new AppError(
-        'CASCADE_GUARD_VIOLATION',
-        'Cannot reset tournament: This event has published rounds or is marked completed. Explicit confirmation is required to reset published tournament history.',
-        409
-      );
-    }
-
-    const roundIds = (rounds || []).map(r => r.id);
-
-    // Count records before cleanup
-    const { count: decCount } = await this.supabase
-      .from('decisions')
-      .select('*', { count: 'exact', head: true })
-      .in('round_id', roundIds);
-
-    const { count: simCount } = await this.supabase
-      .from('simulation_runs')
-      .select('*', { count: 'exact', head: true })
-      .in('round_id', roundIds);
-
-    const { count: snapCount } = await this.supabase
-      .from('company_snapshots')
-      .select('*', { count: 'exact', head: true })
-      .in('round_id', roundIds);
-
-    const { count: ledgerCount } = await this.supabase
-      .from('financial_ledger')
-      .select('*', { count: 'exact', head: true })
-      .eq('event_id', eventId);
-
-    const { count: eqCount } = await this.supabase
-      .from('equity_transactions')
-      .select('*', { count: 'exact', head: true })
-      .in('round_id', roundIds);
-
-    // Clean up dependent records in sequence
-    await this.supabase.from('financial_ledger').delete().eq('event_id', eventId);
-    if (roundIds.length > 0) {
-      await this.supabase.from('equity_transactions').delete().in('round_id', roundIds);
-      await this.supabase.from('company_snapshots').delete().in('round_id', roundIds);
-      await this.supabase.from('simulation_runs').delete().in('round_id', roundIds);
-      await this.supabase.from('decisions').delete().in('round_id', roundIds);
-    }
-
-    // Reset rounds to draft
-    await this.supabase
-      .from('rounds')
-      .update({
-        status: 'draft',
-        opened_at: null,
-        locked_at: null,
-        simulated_at: null,
-        published_at: null,
-      })
-      .eq('event_id', eventId);
-
-    // Reset event status to setup and active_round_number to 0
-    await this.supabase
-      .from('events')
-      .update({
-        status: 'setup',
-        active_round_number: 0,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', eventId);
-
-    // Reset presentation state
-    await this.supabase
-      .from('presentation_state')
-      .update({
-        ceremony_stage: 'waiting',
-        mode: 'standings',
-        is_winner_revealed: false,
-        selected_round_number: 1,
-        domain_filter: 'ALL',
-        updated_at: new Date().toISOString(),
-      })
-      .eq('event_id', eventId);
-
-    // Reset policy gates
-    resetOrganizerPolicyGates(eventId);
-
-    const { count: teamCount } = await this.supabase
-      .from('teams')
-      .select('*', { count: 'exact', head: true })
-      .eq('event_id', eventId);
-
-    // Record audit
-    await this.recordAuditLog({
-      actorId,
-      action: 'RESET_ENTIRE_TOURNAMENT',
-      entityName: 'events',
-      entityId: eventId,
-      beforeState: { status: event.status, active_round_number: event.active_round_number },
-      afterState: {
-        status: 'setup',
-        active_round_number: 0,
-        teams_preserved: teamCount || 0,
-        decisions_cleared: decCount || 0,
-        simulations_cleared: simCount || 0,
-        snapshots_cleared: snapCount || 0,
-        ledger_entries_cleared: ledgerCount || 0,
-        equity_cleared: eqCount || 0,
-        reason,
-      },
+    // 2. Call atomic database transaction RPC
+    const { data: rpcData, error: rpcErr } = await this.supabase.rpc('fn_reset_entire_tournament', {
+      p_event_id: eventId,
+      p_actor_id: actorId,
+      p_reason: reason,
+      p_confirm_published: confirmPublished,
+      p_backup_id: backupId,
     });
 
+    if (rpcErr) {
+      const isFnMissing =
+        (rpcErr.message?.includes('function') && rpcErr.message?.includes('does not exist')) ||
+        rpcErr.code === '42883';
+      if (isFnMissing) {
+        throw new AppError(
+          'DATABASE_ERROR',
+          'Database migration required: PostgreSQL RPC fn_reset_entire_tournament is missing or incompatible. Please apply migration 20261027000000_three_domains_and_tournament_resets.sql before resetting tournament. Destructive HTTP fallbacks are strictly disabled for tournament data safety.',
+          500,
+          rpcErr
+        );
+      }
+      if (rpcErr.message?.includes('not found') || rpcErr.code === 'P0002') {
+        throw new AppError('NOT_FOUND', `Event not found: ${eventId}`, 404);
+      }
+      if (rpcErr.message?.includes('Access denied') || rpcErr.code === '42501') {
+        throw new AppError('FORBIDDEN', rpcErr.message, 403);
+      }
+      if (rpcErr.code === '55000' || rpcErr.message?.includes('Cannot reset tournament')) {
+        throw new AppError('CASCADE_GUARD_VIOLATION', rpcErr.message, 409);
+      }
+      throw new AppError('VALIDATION_ERROR', `Failed to reset tournament: ${rpcErr.message}`, 400);
+    }
+
+    if (!rpcData) {
+      throw new AppError('DATABASE_ERROR', 'RPC fn_reset_entire_tournament executed but returned no result.', 500);
+    }
+
+    // 3. Invalidate in-memory organizer policy gates upon confirmed atomic database reset
+    resetOrganizerPolicyGates(eventId);
+
     return {
-      success: true,
-      event_id: eventId,
-      event_name: event.name,
-      new_event_status: 'setup',
-      active_round_number: 0,
-      teams_preserved: teamCount || 0,
-      decisions_cleared: decCount || 0,
-      simulations_cleared: simCount || 0,
-      snapshots_cleared: snapCount || 0,
-      ledger_entries_cleared: ledgerCount || 0,
-      equity_transactions_cleared: eqCount || 0,
-      reason,
+      ...rpcData,
+      backup_id: backupId,
     };
   }
 

@@ -8,8 +8,8 @@ let serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 if (!supabaseUrl || !serviceRoleKey) {
   if (fs.existsSync('.env.local')) {
     const env = fs.readFileSync('.env.local', 'utf8');
-    supabaseUrl = supabaseUrl || env.match(/NEXT_PUBLIC_SUPABASE_URL=(.*)/)?.[1]?.trim();
-    serviceRoleKey = serviceRoleKey || env.match(/SUPABASE_SERVICE_ROLE_KEY=(.*)/)?.[1]?.trim();
+    supabaseUrl = supabaseUrl || env.match(/NEXT_PUBLIC_SUPABASE_URL=(.*)/)?.[1]?.replace(/["']/g, '')?.trim();
+    serviceRoleKey = serviceRoleKey || env.match(/SUPABASE_SERVICE_ROLE_KEY=(.*)/)?.[1]?.replace(/["']/g, '')?.trim();
   }
 }
 
@@ -17,7 +17,7 @@ if (!supabaseUrl || !serviceRoleKey) {
   throw new Error('Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY environment variables.');
 }
 
-const client = createClient(supabaseUrl, serviceRoleKey);
+const client = createClient(supabaseUrl.replace(/["']/g, '').trim(), serviceRoleKey.replace(/["']/g, '').trim());
 
 async function setup() {
   console.log('--- Setting up Fresh Isolated Event on Dev Database ---');

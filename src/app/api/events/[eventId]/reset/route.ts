@@ -23,14 +23,15 @@ export async function POST(
     const service = new TournamentService(supabase);
 
     // 1. Create durable backup snapshot before any destructive deletion
-    const backupSnapshot = await service.createTournamentBackup(eventId);
+    const backupSnapshot = await service.createDurableTournamentBackup(eventId, adminId, validated.reason);
 
-    // 2. Perform atomic full reset
+    // 2. Perform atomic full reset with verified backup
     const result = await service.resetEntireTournament(
       eventId,
       adminId,
       validated.reason,
-      validated.confirmPublished
+      validated.confirmPublished,
+      backupSnapshot.id
     );
 
     return successResponse({
@@ -39,6 +40,7 @@ export async function POST(
       backupStatus: 'verified_complete',
     });
   } catch (err) {
+    console.error('Reset tournament API error:', err);
     return errorResponse(err);
   }
 }

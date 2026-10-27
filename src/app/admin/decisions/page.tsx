@@ -537,7 +537,7 @@ function AdminDecisionsContent() {
                     </div>
                   )}
 
-                  <form onSubmit={handleConfirmDecision} className="space-y-6">
+                  <form onSubmit={handleConfirmDecision} noValidate className="space-y-6">
                     {/* 5 CORE DECISION INPUTS */}
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       {/* MARKETING */}
@@ -549,7 +549,7 @@ function AdminDecisionsContent() {
                           ref={mktRef}
                           type="number"
                           min="0"
-                          step="1000"
+                          step="any"
                           placeholder="e.g. 150000"
                           value={marketingBudget}
                           onChange={e => setMarketingBudget(e.target.value)}
@@ -567,7 +567,7 @@ function AdminDecisionsContent() {
                         <Input
                           type="number"
                           min="0"
-                          step="1000"
+                          step="any"
                           placeholder="e.g. 120000"
                           value={rdBudget}
                           onChange={e => setRdBudget(e.target.value)}
@@ -585,7 +585,7 @@ function AdminDecisionsContent() {
                         <Input
                           type="number"
                           min="0"
-                          step="50"
+                          step="any"
                           placeholder="e.g. 1200"
                           value={productionUnits}
                           onChange={e => setProductionUnits(e.target.value)}
@@ -606,7 +606,7 @@ function AdminDecisionsContent() {
                           type="number"
                           min={minPrice}
                           max={maxPrice}
-                          step="10"
+                          step="any"
                           placeholder={`Benchmark: $${selectedTeam.benchmarkPrice}`}
                           value={unitPrice}
                           onChange={e => setUnitPrice(e.target.value)}

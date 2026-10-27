@@ -26,6 +26,8 @@ export type ErrorCode =
   | 'UNVERIFIED_SUBMISSIONS'
   | 'DECISION_LOCKED'
   | 'INACTIVE_DOMAIN_ASSIGNED'
+  | 'DATABASE_ERROR'
+  | 'BACKUP_FAILED'
   | 'VALIDATION_ERROR';
 
 export class AppError extends Error {
