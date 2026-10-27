@@ -63,7 +63,8 @@ GRANT SELECT, INSERT, UPDATE ON public.tournament_backups TO authenticated;
 
 CREATE OR REPLACE FUNCTION public.fn_restore_tournament_from_backup(
     p_backup_id UUID,
-    p_actor_id UUID DEFAULT NULL
+    p_actor_id UUID DEFAULT NULL,
+    p_confirm_overwrite BOOLEAN DEFAULT false
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -75,14 +76,24 @@ DECLARE
     v_effective_actor_id UUID;
     v_event_id UUID;
     v_item RECORD;
+    v_has_newer_run BOOLEAN := false;
+    v_has_in_progress_simulation BOOLEAN := false;
     v_decisions_restored INTEGER := 0;
     v_sim_runs_restored INTEGER := 0;
     v_snapshots_restored INTEGER := 0;
     v_ledger_restored INTEGER := 0;
     v_equity_restored INTEGER := 0;
 BEGIN
-    -- 1. Determine effective actor
-    v_effective_actor_id := COALESCE(auth.uid(), p_actor_id);
+    -- 1. Determine effective actor (auth.uid() or service_role authorized p_actor_id)
+    v_effective_actor_id := auth.uid();
+    IF v_effective_actor_id IS NULL THEN
+        IF COALESCE(current_setting('request.jwt.claim.role', true), '') IN ('service_role', 'supabase_admin') OR current_user IN ('postgres', 'service_role', 'supabase_admin') THEN
+            v_effective_actor_id := p_actor_id;
+        ELSE
+            RAISE EXCEPTION 'Access denied: Direct unauthenticated execution of administrative restore is prohibited.'
+                USING ERRCODE = '42501';
+        END IF;
+    END IF;
 
     -- 2. Enforce super_admin authorization
     IF v_effective_actor_id IS NULL OR NOT EXISTS (
@@ -116,6 +127,37 @@ BEGIN
     -- 4. Lock event and rounds
     PERFORM id FROM public.events WHERE id = v_event_id FOR UPDATE;
     PERFORM id FROM public.rounds WHERE event_id = v_event_id FOR UPDATE;
+
+    -- 4.1 Guard against active in-progress simulation
+    SELECT EXISTS (
+        SELECT 1 FROM public.simulation_runs sr
+        JOIN public.rounds r ON r.id = sr.round_id
+        WHERE r.event_id = v_event_id
+          AND sr.status IN ('in_progress', 'running')
+    ) INTO v_has_in_progress_simulation;
+
+    IF v_has_in_progress_simulation THEN
+        RAISE EXCEPTION 'Cannot restore tournament: A simulation run is currently in progress for this event.'
+            USING ERRCODE = '55000';
+    END IF;
+
+    -- 4.2 Guard against silently overwriting a newer tournament run without explicit confirmation
+    SELECT EXISTS (
+        SELECT 1 FROM public.simulation_runs sr
+        JOIN public.rounds r ON r.id = sr.round_id
+        WHERE r.event_id = v_event_id
+          AND sr.created_at > v_backup.created_at
+    ) OR EXISTS (
+        SELECT 1 FROM public.rounds
+        WHERE event_id = v_event_id
+          AND status IN ('simulated', 'reviewed', 'published')
+          AND COALESCE(published_at, simulated_at, locked_at, opened_at, created_at) > v_backup.created_at
+    ) INTO v_has_newer_run;
+
+    IF v_has_newer_run AND NOT p_confirm_overwrite THEN
+        RAISE EXCEPTION 'Cannot restore backup: The current tournament has newer simulation progress or published rounds. Explicit confirmation (p_confirm_overwrite = true) is required to overwrite newer tournament progress.'
+            USING ERRCODE = '55000';
+    END IF;
 
     -- 5. Wipe post-reset simulation / decision state to prepare clean restore
     DELETE FROM public.financial_ledger WHERE event_id = v_event_id;
@@ -342,8 +384,16 @@ DECLARE
     v_equity_count INTEGER := 0;
     v_target_status TEXT;
 BEGIN
-    -- 1. Determine effective actor (auth.uid() or explicit p_actor_id)
-    v_effective_actor_id := COALESCE(auth.uid(), p_actor_id);
+    -- 1. Determine effective actor (auth.uid() or service_role authorized p_actor_id)
+    v_effective_actor_id := auth.uid();
+    IF v_effective_actor_id IS NULL THEN
+        IF COALESCE(current_setting('request.jwt.claim.role', true), '') IN ('service_role', 'supabase_admin') OR current_user IN ('postgres', 'service_role', 'supabase_admin') THEN
+            v_effective_actor_id := p_actor_id;
+        ELSE
+            RAISE EXCEPTION 'Access denied: Direct unauthenticated execution of administrative round reset is prohibited.'
+                USING ERRCODE = '42501';
+        END IF;
+    END IF;
 
     -- 2. Enforce super_admin authorization
     IF v_effective_actor_id IS NULL OR NOT EXISTS (
@@ -518,8 +568,16 @@ DECLARE
     v_has_published_rounds BOOLEAN := false;
     v_has_in_progress_simulation BOOLEAN := false;
 BEGIN
-    -- 1. Determine effective actor (auth.uid() or explicit p_actor_id)
-    v_effective_actor_id := COALESCE(auth.uid(), p_actor_id);
+    -- 1. Determine effective actor (auth.uid() or service_role authorized p_actor_id)
+    v_effective_actor_id := auth.uid();
+    IF v_effective_actor_id IS NULL THEN
+        IF COALESCE(current_setting('request.jwt.claim.role', true), '') IN ('service_role', 'supabase_admin') OR current_user IN ('postgres', 'service_role', 'supabase_admin') THEN
+            v_effective_actor_id := p_actor_id;
+        ELSE
+            RAISE EXCEPTION 'Access denied: Direct unauthenticated execution of administrative tournament reset is prohibited.'
+                USING ERRCODE = '42501';
+        END IF;
+    END IF;
 
     -- 2. Enforce super_admin authorization
     IF v_effective_actor_id IS NULL OR NOT EXISTS (
@@ -724,7 +782,12 @@ BEGIN
 END;
 $$;
 
--- Grant execution to authenticated users and service_role
-GRANT EXECUTE ON FUNCTION public.fn_restore_tournament_from_backup(UUID, UUID) TO authenticated, service_role;
+-- Revoke execution from PUBLIC and anon to prevent unauthenticated direct RPC execution
+REVOKE ALL ON FUNCTION public.fn_restore_tournament_from_backup(UUID, UUID, BOOLEAN) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.fn_reset_round_decisions(UUID, UUID, TEXT, TEXT) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.fn_reset_entire_tournament(UUID, UUID, TEXT, BOOLEAN, UUID) FROM PUBLIC, anon;
+
+-- Grant execution exclusively to authenticated users and service_role
+GRANT EXECUTE ON FUNCTION public.fn_restore_tournament_from_backup(UUID, UUID, BOOLEAN) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.fn_reset_round_decisions(UUID, UUID, TEXT, TEXT) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.fn_reset_entire_tournament(UUID, UUID, TEXT, BOOLEAN, UUID) TO authenticated, service_role;

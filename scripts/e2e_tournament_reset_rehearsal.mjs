@@ -651,6 +651,24 @@ async function main() {
     await page.waitForTimeout(600);
   }
 
+  // Approve organizer policies for second tournament run
+  console.log('Approving organizer policies for second tournament run...');
+  await page.evaluate(async (eid) => {
+    const res = await fetch('/api/approvals', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        eventId: eid,
+        cashValuationPolicyApproved: true,
+        corporateTaxationApproved: true,
+        standardVCOffersApproved: true,
+        strictSpendingRejectionApproved: true,
+        approvedBy: 'Super Admin Re-Run',
+      }),
+    });
+    if (!res.ok) throw new Error('Policy approval failed: ' + await res.text());
+  }, event.id);
+
   // Lock, simulate, review, publish fresh Round 1
   await page.goto(`${BASE_URL}/admin/rounds`, { waitUntil: 'networkidle' });
   const currentRounds = await page.evaluate(async () => {
@@ -660,14 +678,18 @@ async function main() {
   const r1 = currentRounds.find(x => x.round_number === 1);
 
   await page.evaluate(async (rid) => {
-    await fetch(`/api/rounds/${rid}/lock`, { method: 'POST' });
-    await fetch(`/api/rounds/${rid}/simulate`, { method: 'POST' });
-    await fetch(`/api/rounds/${rid}/review`, { method: 'POST' });
-    await fetch(`/api/rounds/${rid}/publish`, {
+    const lockRes = await fetch(`/api/rounds/${rid}/lock`, { method: 'POST' });
+    if (!lockRes.ok) throw new Error('Lock failed: ' + await lockRes.text());
+    const simRes = await fetch(`/api/rounds/${rid}/simulate`, { method: 'POST' });
+    if (!simRes.ok) throw new Error('Simulate failed: ' + await simRes.text());
+    const revRes = await fetch(`/api/rounds/${rid}/review`, { method: 'POST' });
+    if (!revRes.ok) throw new Error('Review failed: ' + await revRes.text());
+    const pubRes = await fetch(`/api/rounds/${rid}/publish`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ confirmPublish: true }),
     });
+    if (!pubRes.ok) throw new Error('Publish failed: ' + await pubRes.text());
   }, r1.id);
 
   console.log('[PASS] Fresh Round 1 simulated and published in second tournament run.');
@@ -681,11 +703,25 @@ async function main() {
   // STEP 11: ISOLATED RESTORATION PROCEDURE VERIFICATION
   // ---------------------------------------------------------------------------
   console.log('\n>>> [STEP 11] Testing Persistent Backup Restoration Procedure...');
-  console.log(`Invoking fn_restore_tournament_from_backup for backup ID: ${latestBackup.id}...`);
+  console.log(`Testing newer-run overwrite protection guard without p_confirm_overwrite...`);
 
+  // Guard test: Attempting restore without p_confirm_overwrite should be blocked
+  const { error: blockedErr } = await supabase.rpc('fn_restore_tournament_from_backup', {
+    p_backup_id: latestBackup.id,
+    p_actor_id: superAdmin.id,
+    p_confirm_overwrite: false,
+  });
+
+  if (!blockedErr || !blockedErr.message.includes('newer simulation progress')) {
+    throw new Error('Expected newer-run overwrite protection guard to block unconfirmed restore, but got: ' + (blockedErr?.message || 'success'));
+  }
+  console.log('[PASS] Newer-run overwrite protection guard correctly blocked unconfirmed restore!');
+
+  console.log(`Invoking fn_restore_tournament_from_backup with p_confirm_overwrite = true for backup ID: ${latestBackup.id}...`);
   const { data: restoreResult, error: restoreErr } = await supabase.rpc('fn_restore_tournament_from_backup', {
     p_backup_id: latestBackup.id,
     p_actor_id: superAdmin.id,
+    p_confirm_overwrite: true,
   });
 
   if (restoreErr) throw new Error('Restoration failed: ' + restoreErr.message);

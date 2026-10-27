@@ -854,10 +854,11 @@ export class TournamentService {
     return this.createDurableTournamentBackup(eventId, actorId);
   }
 
-  async restoreTournamentFromBackup(backupId: string, actorId: string) {
+  async restoreTournamentFromBackup(backupId: string, actorId: string, confirmOverwrite: boolean = false) {
     const { data: rpcData, error: rpcErr } = await this.supabase.rpc('fn_restore_tournament_from_backup', {
       p_backup_id: backupId,
       p_actor_id: actorId,
+      p_confirm_overwrite: confirmOverwrite,
     });
 
     if (rpcErr) {

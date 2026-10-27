@@ -544,6 +544,7 @@ describe('Safe Tournament Resets & Three-Domain Standardization Test Suite', () 
       expect(mockSupabase.rpc).toHaveBeenCalledWith('fn_restore_tournament_from_backup', {
         p_backup_id: 'backup-00000000-0001',
         p_actor_id: superAdminId,
+        p_confirm_overwrite: false,
       });
     });
   });
