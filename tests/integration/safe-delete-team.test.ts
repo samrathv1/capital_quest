@@ -136,10 +136,12 @@ describe('Safe Team Deletion: Integrity & Dependency Rules', () => {
               error: null,
             }),
             delete: vi.fn().mockImplementation(() => ({
-              eq: vi.fn().mockImplementation(() => {
-                unsubmittedDecisionsDeleted = true;
-                return Promise.resolve({ error: null });
-              }),
+              eq: vi.fn().mockImplementation(() => ({
+                in: vi.fn().mockImplementation(() => {
+                  unsubmittedDecisionsDeleted = true;
+                  return Promise.resolve({ error: null });
+                }),
+              })),
             })),
           };
         }
@@ -209,7 +211,7 @@ describe('Safe Team Deletion: Integrity & Dependency Rules', () => {
     }
   });
 
-  it('blocks deletion if team has submitted or verified decisions', async () => {
+  it('blocks deletion if team has verified or locked decisions', async () => {
     const mockSupabase = {
       from: vi.fn().mockImplementation((table: string) => {
         if (table === 'teams') {
@@ -247,8 +249,86 @@ describe('Safe Team Deletion: Integrity & Dependency Rules', () => {
       await service.deleteTeam(teamId, adminId);
     } catch (err: any) {
       expect(err.code).toBe('CASCADE_GUARD_VIOLATION');
-      expect(err.message).toContain('submitted or verified decision(s)');
+      expect(err.message).toContain('verified or locked decision(s)');
     }
+  });
+
+  it('allows Super Admin to delete a team with an ENTERED (unverified) decision, safely cleaning it up', async () => {
+    let enteredDecisionsCleaned = false;
+    let teamDeleted = false;
+    let membersDeleted = false;
+
+    const mockSupabase = {
+      from: vi.fn().mockImplementation((table: string) => {
+        if (table === 'teams') {
+          return {
+            select: vi.fn().mockReturnThis(),
+            eq: vi.fn().mockReturnThis(),
+            maybeSingle: vi.fn().mockResolvedValue({ data: mockTeam, error: null }),
+            delete: vi.fn().mockImplementation(() => ({
+              eq: vi.fn().mockImplementation(() => {
+                teamDeleted = true;
+                return Promise.resolve({ error: null });
+              }),
+            })),
+          };
+        }
+        if (table === 'rounds') {
+          return {
+            select: vi.fn().mockReturnThis(),
+            eq: vi.fn().mockReturnThis(),
+            in: vi.fn().mockResolvedValue({ data: [], error: null }),
+          };
+        }
+        if (table === 'decisions') {
+          return {
+            select: vi.fn().mockReturnThis(),
+            eq: vi.fn().mockResolvedValue({
+              data: [{ id: 'dec-entered-1', round_id: 'r1', status: 'entered' }],
+              error: null,
+            }),
+            delete: vi.fn().mockImplementation(() => ({
+              eq: vi.fn().mockImplementation(() => ({
+                in: vi.fn().mockImplementation(() => {
+                  enteredDecisionsCleaned = true;
+                  return Promise.resolve({ error: null });
+                }),
+              })),
+            })),
+          };
+        }
+        if (table === 'team_members') {
+          return {
+            delete: vi.fn().mockImplementation(() => ({
+              eq: vi.fn().mockImplementation(() => {
+                membersDeleted = true;
+                return Promise.resolve({ error: null });
+              }),
+            })),
+          };
+        }
+        if (table === 'company_snapshots' || table === 'financial_ledger' || table === 'equity_transactions') {
+          return {
+            select: vi.fn().mockReturnThis(),
+            eq: vi.fn().mockResolvedValue({ count: 0, error: null }),
+          };
+        }
+        if (table === 'audit_logs') {
+          return {
+            insert: vi.fn().mockResolvedValue({ error: null }),
+          };
+        }
+        return { select: vi.fn().mockReturnThis(), eq: vi.fn().mockReturnThis() };
+      }),
+    };
+
+    const service = new TournamentService(mockSupabase as any);
+    const result = await service.deleteTeam(teamId, adminId);
+
+    expect(result.success).toBe(true);
+    expect(teamDeleted).toBe(true);
+    expect(membersDeleted).toBe(true);
+    expect(enteredDecisionsCleaned).toBe(true);
   });
 
   it('blocks deletion if team has simulation snapshots recorded', async () => {

@@ -69,13 +69,21 @@ interface RoundData {
     isReadyToLock: boolean;
   };
   teams: TeamDecisionEntry[];
+  allRounds?: Array<{
+    id: string;
+    roundNumber: number;
+    status: string;
+    type: string;
+  }>;
 }
 
 function AdminDecisionsContent() {
   const searchParams = useSearchParams();
   const initialTeamId = searchParams.get('teamId') || '';
+  const initialRoundId = searchParams.get('roundId') || '';
 
   const [data, setData] = React.useState<RoundData | null>(null);
+  const [selectedRoundId, setSelectedRoundId] = React.useState<string>(initialRoundId);
   const [selectedTeamId, setSelectedTeamId] = React.useState<string>(initialTeamId);
   const [searchFilter, setSearchFilter] = React.useState('');
   const [isLoading, setIsLoading] = React.useState(true);
@@ -94,17 +102,22 @@ function AdminDecisionsContent() {
 
   const mktRef = React.useRef<HTMLInputElement>(null);
 
-  const fetchRoundData = React.useCallback(async (targetTeamId?: string) => {
+  const fetchRoundData = React.useCallback(async (targetTeamId?: string, targetRoundId?: string) => {
     setIsLoading(true);
     setErrorMsg(null);
     try {
-      const res = await fetch('/api/admin/decisions');
+      const activeRound = targetRoundId !== undefined ? targetRoundId : selectedRoundId;
+      const url = activeRound ? `/api/admin/decisions?roundId=${encodeURIComponent(activeRound)}` : '/api/admin/decisions';
+      const res = await fetch(url);
       const json = await res.json();
       if (!res.ok) {
         throw new Error(json.error?.message || json.message || 'Failed to load round decisions');
       }
       const roundData: RoundData = json.data;
       setData(roundData);
+      if (roundData.round?.id) {
+        setSelectedRoundId(roundData.round.id);
+      }
 
       // Determine active team
       const targetId = targetTeamId || selectedTeamId;
@@ -121,11 +134,11 @@ function AdminDecisionsContent() {
     } finally {
       setIsLoading(false);
     }
-  }, [selectedTeamId]);
+  }, [selectedTeamId, selectedRoundId]);
 
   React.useEffect(() => {
-    fetchRoundData(initialTeamId);
-  }, [initialTeamId, fetchRoundData]);
+    fetchRoundData(initialTeamId, initialRoundId || undefined);
+  }, [initialTeamId, initialRoundId, fetchRoundData]);
 
   const populateForm = (team: TeamDecisionEntry) => {
     if (team.decision) {
@@ -312,6 +325,47 @@ function AdminDecisionsContent() {
             </Button>
           </div>
         </div>
+
+        {/* ROUND SELECTOR PILLS */}
+        {data?.allRounds && data.allRounds.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 pb-1 border-b border-slate-800/60">
+            <span className="text-xs font-mono text-slate-400 mr-1 uppercase font-semibold">Round:</span>
+            {data.allRounds.map((r) => {
+              const isSelected = r.id === data.round.id;
+              return (
+                <button
+                  key={r.id}
+                  type="button"
+                  onClick={() => {
+                    if (r.id !== data.round.id) {
+                      fetchRoundData(undefined, r.id);
+                    }
+                  }}
+                  className={`px-3 py-1.5 text-xs font-mono rounded-lg transition-all flex items-center gap-2 border ${
+                    isSelected
+                      ? 'bg-sky-600 text-white border-sky-500 font-bold shadow-md shadow-sky-950'
+                      : 'bg-slate-900/80 text-slate-300 border-slate-800 hover:text-white hover:bg-slate-800/90'
+                  }`}
+                >
+                  <span>Round {r.roundNumber}</span>
+                  <span
+                    className={`text-[10px] px-1.5 py-0.5 rounded font-mono uppercase font-semibold ${
+                      r.status === 'open'
+                        ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/60'
+                        : r.status === 'locked'
+                        ? 'bg-amber-950/80 text-amber-300 border border-amber-800/60'
+                        : r.status === 'simulated' || r.status === 'published'
+                        ? 'bg-purple-950/80 text-purple-300 border border-purple-800/60'
+                        : 'bg-slate-950 text-slate-500 border border-slate-800'
+                    }`}
+                  >
+                    {r.status}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         {/* PROGRESS BANNER */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">

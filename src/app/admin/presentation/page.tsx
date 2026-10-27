@@ -376,7 +376,7 @@ export default function AdminPresentationPage() {
                       const isSelected = currentState?.selectedRoundNumber === round.roundNumber;
                       return (
                         <Button
-                          key={round.id}
+                          key={round.roundNumber}
                           variant={isSelected ? 'primary' : 'outline'}
                           size="sm"
                           disabled={isUpdating}

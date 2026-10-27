@@ -89,7 +89,16 @@ export const DOMAIN_ARCHETYPES: Record<string, DomainConfig> = {
  */
 export function getDomainConfig(code: string): DomainConfig {
   const normalized = code.toLowerCase().trim();
-  const config = DOMAIN_ARCHETYPES[normalized];
+  const aliasMap: Record<string, string> = {
+    clean: 'cleantech',
+    cleantech: 'cleantech',
+    health: 'healthtech',
+    healthtech: 'healthtech',
+    saas: 'saas',
+    d2c: 'd2c',
+  };
+  const targetKey = aliasMap[normalized] || normalized;
+  const config = DOMAIN_ARCHETYPES[targetKey];
   if (!config) {
     throw new Error(`Domain configuration not found for code: "${code}". Allowed domains: cleantech, healthtech, saas, d2c.`);
   }

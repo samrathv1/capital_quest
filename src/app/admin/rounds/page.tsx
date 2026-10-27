@@ -64,6 +64,7 @@ interface RoundOverviewItem {
 }
 
 interface RoundsOverviewData {
+  eventId?: string;
   rounds: RoundOverviewItem[];
   activeRoundNumber: number;
   organizerPolicies: {
@@ -202,7 +203,8 @@ export default function AdminRoundsPage() {
     setIsApproving(true);
     setPolicyError(null);
     try {
-      const res = await fetch('/api/approvals', {
+      const eventParam = data?.eventId ? `?eventId=${encodeURIComponent(data.eventId)}` : '';
+      const res = await fetch(`/api/approvals${eventParam}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

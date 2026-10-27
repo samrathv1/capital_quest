@@ -6,6 +6,8 @@
  * from silently becoming immutable tournament rules without formal recorded approval.
  */
 
+import { SupabaseClient } from '@supabase/supabase-js';
+
 export interface OrganizerPolicyGates {
   cashValuationPolicyApproved: boolean;
   corporateTaxationApproved: boolean;
@@ -40,20 +42,53 @@ export function getOrganizerPolicyGates(eventId: string): OrganizerPolicyGates {
 
 /**
  * Records formal organizer approval for an event.
+ * Supports structured approval objects or individual string policy keys.
  */
 export function recordOrganizerApproval(
   eventId: string,
-  approval: Partial<OrganizerPolicyGates> & { approvedBy: string }
+  approvalOrKey: (Partial<OrganizerPolicyGates> & { approvedBy?: string }) | string,
+  approverName?: string,
+  approverId?: string
 ): OrganizerPolicyGates {
   const current = getOrganizerPolicyGates(eventId);
 
+  let updates: Partial<OrganizerPolicyGates> = {};
+  let approver = approverName || approverId || 'Organizer';
+
+  if (typeof approvalOrKey === 'string') {
+    const key = approvalOrKey.toLowerCase();
+    if (key === 'cash_valuation' || key === 'cashvaluationpolicyapproved') {
+      updates.cashValuationPolicyApproved = true;
+    } else if (key === 'corporate_tax' || key === 'corporatetaxationapproved') {
+      updates.corporateTaxationApproved = true;
+    } else if (key === 'standard_vc_offers' || key === 'standardvcoffersapproved') {
+      updates.standardVCOffersApproved = true;
+    } else if (key === 'strict_spending' || key === 'strictspendingrejectionapproved') {
+      updates.strictSpendingRejectionApproved = true;
+    } else if (key === 'pro_rata_scaling' || key === 'proratascalingapproved') {
+      updates.proRataScalingApproved = true;
+    } else if (key === 'all') {
+      updates = {
+        cashValuationPolicyApproved: true,
+        corporateTaxationApproved: true,
+        standardVCOffersApproved: true,
+        strictSpendingRejectionApproved: true,
+        proRataScalingApproved: true,
+      };
+    }
+  } else if (approvalOrKey && typeof approvalOrKey === 'object') {
+    updates = { ...approvalOrKey };
+    if (approvalOrKey.approvedBy) {
+      approver = approvalOrKey.approvedBy;
+    }
+  }
+
   const updated: OrganizerPolicyGates = {
     ...current,
-    ...approval,
-    // Strict Spending Solvency requires explicit authorization; legacy pro-rata scaling does not satisfy it
-    strictSpendingRejectionApproved: approval.strictSpendingRejectionApproved ?? current.strictSpendingRejectionApproved,
-    proRataScalingApproved: approval.proRataScalingApproved ?? current.proRataScalingApproved,
-    approvedBy: approval.approvedBy,
+    ...updates,
+    strictSpendingRejectionApproved: updates.strictSpendingRejectionApproved ?? current.strictSpendingRejectionApproved,
+    proRataScalingApproved: updates.proRataScalingApproved ?? current.proRataScalingApproved,
+    approvedBy: approver,
     approvedAt: new Date().toISOString(),
   };
 
@@ -89,4 +124,47 @@ export function assertOrganizerPoliciesApproved(eventId: string): {
     approved: pendingPolicies.length === 0,
     pendingPolicies,
   };
+}
+
+/**
+ * Hydrates and synchronizes organizer policy approvals from persisted audit logs.
+ */
+export async function syncOrganizerPolicyApprovals(
+  eventId: string,
+  supabaseClient?: SupabaseClient
+): Promise<OrganizerPolicyGates> {
+  if (supabaseClient && eventId && eventId !== 'default-event') {
+    try {
+      const { data: audit } = await supabaseClient
+        .from('audit_logs')
+        .select('after_state')
+        .eq('entity_name', 'events')
+        .eq('entity_id', eventId)
+        .eq('action', 'organizer.policy_approval')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (audit?.after_state) {
+        const persisted = audit.after_state as Partial<OrganizerPolicyGates>;
+        const current = getOrganizerPolicyGates(eventId);
+        const merged: OrganizerPolicyGates = {
+          ...current,
+          cashValuationPolicyApproved: Boolean(persisted.cashValuationPolicyApproved),
+          corporateTaxationApproved: Boolean(persisted.corporateTaxationApproved),
+          standardVCOffersApproved: Boolean(persisted.standardVCOffersApproved),
+          strictSpendingRejectionApproved: Boolean(persisted.strictSpendingRejectionApproved),
+          proRataScalingApproved: Boolean(persisted.proRataScalingApproved),
+          approvedBy: persisted.approvedBy || current.approvedBy,
+          approvedAt: persisted.approvedAt || current.approvedAt,
+        };
+        eventApprovalRegistry.set(eventId, merged);
+        return merged;
+      }
+    } catch {
+      // Fallback to in-memory registry
+    }
+  }
+
+  return getOrganizerPolicyGates(eventId);
 }

@@ -19,20 +19,20 @@ export async function POST(
     }
     const validated = SimulateRoundSchema.parse(body);
 
-    let supabase;
     let adminId = '00000000-0000-0000-0000-000000000000';
 
     try {
-      supabase = await createClient();
-      const { data: { user } } = await supabase.auth.getUser();
+      const authClient = await createClient();
+      const { data: { user } } = await authClient.auth.getUser();
       if (user) {
         adminId = user.id;
-      } else {
-        supabase = createAdminClient();
       }
     } catch {
-      supabase = createAdminClient();
+      // Unauthenticated / fallback
     }
+
+    // fn_commit_simulation_run is restricted to service_role to ensure atomic integrity
+    const supabase = createAdminClient();
 
     const output = await executeSimulationRound({
       roundId,

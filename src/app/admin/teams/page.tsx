@@ -642,7 +642,8 @@ export default function AdminTeamsPage() {
                       Are you sure you want to delete this team?
                     </p>
                     <p className="text-rose-300/80">
-                      This will permanently remove the team record and all associated founder roster entries.
+                      This will permanently remove the team record, unverified decision drafts, and all associated founder roster entries.
+                      Teams with verified decisions or simulated tournament history cannot be deleted.
                       This action <span className="font-bold underline text-white">cannot be undone</span>.
                     </p>
                   </div>

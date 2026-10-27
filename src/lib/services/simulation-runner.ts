@@ -14,7 +14,7 @@ import {
 import { DOMAIN_ARCHETYPES, getDomainConfig } from '@/engine/config/domain-archetypes';
 import { D, ZERO } from '@/engine/math/precision';
 import { AppError } from '@/lib/errors/app-error';
-import { assertOrganizerPoliciesApproved } from './organizer-approvals';
+import { assertOrganizerPoliciesApproved, syncOrganizerPolicyApprovals } from './organizer-approvals';
 
 export interface ExecuteSimulationParams {
   roundId: string;
@@ -447,6 +447,7 @@ export async function executeSimulationRound(
 
   // 2. Organizer Policy Gate Validation
   if (requireOrganizerApproval) {
+    await syncOrganizerPolicyApprovals(round.event_id, supabaseClient);
     const approvalCheck = assertOrganizerPoliciesApproved(round.event_id);
     if (!approvalCheck.approved) {
       throw new AppError(
