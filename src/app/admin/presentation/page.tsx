@@ -49,14 +49,31 @@ interface AdminPresentationResponse {
     status: string;
   }[];
   isFinalRoundPublished: boolean;
-  topThreeCandidatePreview: {
+  topThreeCandidatePreview?: {
     rank: number;
     companyName: string;
     domainName: string;
     score: number;
+    finalScore?: number;
     valuation: number;
     founderEquityPercent: number;
   }[];
+  domainChampions?: Array<{
+    domainCode: string;
+    domainName: string;
+    champion: {
+      teamId: string;
+      companyName: string;
+      domainName: string;
+      domainCode: string;
+      domainRank: number;
+      score: number;
+      finalScore?: number;
+      valuation: number;
+      founderEquityPercent: number;
+      tableStation?: string;
+    } | null;
+  }>;
 }
 
 const CEREMONY_STAGES: {
@@ -602,7 +619,7 @@ export default function AdminPresentationPage() {
               </CardContent>
             </Card>
 
-            {/* 2. CONFIDENTIAL ORGANIZER WINNER PREVIEW */}
+            {/* 2. CONFIDENTIAL ORGANIZER DOMAIN CHAMPIONS PREVIEW */}
             <Card className="border-slate-800 bg-[#0B101E]">
               <CardHeader className="pb-3 border-b border-slate-800/80">
                 <CardTitle className="text-sm font-bold text-white flex items-center justify-between">
@@ -617,16 +634,47 @@ export default function AdminPresentationPage() {
               </CardHeader>
               <CardContent className="pt-4 space-y-3">
                 <p className="text-[11px] text-slate-400">
-                  Authoritative top 3 finalists from officially published final results. Use this card to coordinate stage announcements.
+                  Certified independent champions for each active business domain from officially published final results.
                 </p>
 
-                {(!data?.topThreeCandidatePreview || data.topThreeCandidatePreview.length === 0) ? (
+                {(!data?.domainChampions || data.domainChampions.length === 0) && (!data?.topThreeCandidatePreview || data.topThreeCandidatePreview.length === 0) ? (
                   <div className="text-xs text-slate-500 p-3 border border-dashed border-slate-800 rounded-lg text-center">
-                    Top 3 winners unavailable until final round is published.
+                    Domain champions unavailable until final round is published.
+                  </div>
+                ) : data?.domainChampions && data.domainChampions.length > 0 ? (
+                  <div className="space-y-2">
+                    {data.domainChampions.map((item) => (
+                      <div
+                        key={item.domainCode}
+                        className="p-2.5 rounded-lg border border-slate-800 bg-slate-900/40 flex items-center justify-between"
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <div className="h-6 w-6 rounded-full bg-amber-400 text-slate-950 flex items-center justify-center font-bold text-xs">
+                            <Crown className="h-3.5 w-3.5" />
+                          </div>
+                          <div>
+                            <div className="text-xs font-bold text-white">
+                              {item.champion ? item.champion.companyName : 'No Eligible Contenders'}
+                            </div>
+                            <div className="text-[10px] text-slate-400">{item.domainName}</div>
+                          </div>
+                        </div>
+                        {item.champion && (
+                          <div className="text-right">
+                            <div className="text-xs font-mono font-bold text-emerald-400">
+                              {(item.champion.score ?? item.champion.finalScore ?? 0).toFixed(2)} pts
+                            </div>
+                            <div className="text-[10px] text-slate-400 font-mono">
+                              ${(item.champion.valuation / 1000).toFixed(0)}k val
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ))}
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {data.topThreeCandidatePreview.map(winner => (
+                    {data?.topThreeCandidatePreview?.map(winner => (
                       <div
                         key={winner.rank}
                         className={`p-2.5 rounded-lg border flex items-center justify-between ${
@@ -656,7 +704,7 @@ export default function AdminPresentationPage() {
                         </div>
                         <div className="text-right">
                           <div className="text-xs font-mono font-bold text-emerald-400">
-                            {winner.score.toFixed(2)} pts
+                            {(winner.score ?? winner.finalScore ?? 0).toFixed(2)} pts
                           </div>
                           <div className="text-[10px] text-slate-400 font-mono">
                             ${(winner.valuation / 1000).toFixed(0)}k val

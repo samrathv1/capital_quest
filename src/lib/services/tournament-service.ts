@@ -3,7 +3,7 @@ import { SupabaseClient } from '@supabase/supabase-js';
 import { AppError } from '@/lib/errors/app-error';
 import { DecisionSubmitInput, VoidRoundInput, AdminDecisionConfirmInput } from '@/lib/validation/api-schemas';
 import { D } from '@/engine/math/precision';
-import { isActiveDomain } from '@/engine/config/domain-archetypes';
+import { isActiveDomain, normalizeDomainCode } from '@/engine/config/domain-archetypes';
 import { assertOrganizerPoliciesApproved, syncOrganizerPolicyApprovals, resetOrganizerPolicyGates } from './organizer-approvals';
 
 interface PresentationEventRecord {
@@ -41,6 +41,19 @@ export interface PublicLeaderboardRow {
   marketSharePct: number;
   productQualityIndex: number;
   brandEquityScore: number;
+  // Compatibility aliases for presentation screens
+  score?: number;
+  founderEquityPercent?: number;
+  cashOnHand?: number;
+  revenue?: number;
+  rankChange?: number;
+}
+
+export interface DomainLeaderboardSection {
+  domainCode: string;
+  domainName: string;
+  teams: PublicLeaderboardRow[];
+  champion: PublicLeaderboardRow | null;
 }
 
 export interface CeremonyPresentationPayload {
@@ -49,6 +62,11 @@ export interface CeremonyPresentationPayload {
   winners: PublicLeaderboardRow[];
   revealedWinners: PublicLeaderboardRow[];
   currentReveal: PublicLeaderboardRow | null;
+  domainChampions?: Array<{
+    domainCode: string;
+    domainName: string;
+    champion: PublicLeaderboardRow | null;
+  }>;
   reason?: string;
   message?: string;
   isPodiumComplete?: boolean;
@@ -1535,6 +1553,7 @@ export class TournamentService {
     roundNumber?: number;
     domainId?: string;
     callerRole?: string;
+    includeRunnersUp?: boolean;
   }) {
     // 1. Resolve event
     let eventId = params.eventId;
@@ -1721,13 +1740,22 @@ export class TournamentService {
       throw new AppError('NOT_FOUND', `Failed to query leaderboard snapshots: ${snapError.message}`, 500);
     }
 
-    // 6. Deterministic 5-level tie-breaker sort:
+    // 6. Independent Intra-Domain Ranking via Deterministic 5-level tie-breaker:
     // 1. finalScore DESC (equity_adjusted_score)
     // 2. valuation DESC (company_valuation)
     // 3. grossRevenue DESC
     // 4. endingCash DESC
     // 5. teamId ASC (alphabetical)
-    const sortedSnapshots = [...(snapshots || [])].sort((a, b) => {
+    interface SnapshotRankingItem {
+      team_id: string;
+      equity_adjusted_score?: number | string | null;
+      company_valuation?: number | string | null;
+      gross_revenue?: number | string | null;
+      ending_cash?: number | string | null;
+      teams?: unknown;
+    }
+
+    const compareTieBreakers = (a: SnapshotRankingItem, b: SnapshotRankingItem) => {
       const scoreDiff = Number(b.equity_adjusted_score) - Number(a.equity_adjusted_score);
       if (scoreDiff !== 0) return scoreDiff;
 
@@ -1741,11 +1769,41 @@ export class TournamentService {
       if (cashDiff !== 0) return cashDiff;
 
       return String(a.team_id).localeCompare(String(b.team_id));
+    };
+
+    // Partition snapshots by domain so teams compete strictly within their domain
+    const domainGroupMap = new Map<string, SnapshotRankingItem[]>();
+    for (const s of ((snapshots as unknown as SnapshotRankingItem[]) || [])) {
+      const teamObj = s.teams as { domains?: { code?: string } | { code?: string }[] } | undefined;
+      const domainField = Array.isArray(teamObj?.domains) ? teamObj?.domains[0] : teamObj?.domains;
+      const rawCode = domainField?.code || 'D2C';
+      const norm = normalizeDomainCode(rawCode).toUpperCase();
+      const dCode = (norm === 'HEALTHTECH' || norm === 'HEALTH') ? 'HEALTH' : norm;
+      if (!domainGroupMap.has(dCode)) {
+        domainGroupMap.set(dCode, []);
+      }
+      domainGroupMap.get(dCode)!.push(s);
+    }
+
+    // Sort within each domain independently and assign domainRank = index + 1
+    const computedDomainRankMap = new Map<string, number>();
+    for (const group of domainGroupMap.values()) {
+      group.sort(compareTieBreakers);
+      group.forEach((s, idx) => {
+        computedDomainRankMap.set(s.team_id, idx + 1);
+      });
+    }
+
+    // Also sort across tournament deterministically for tournamentRank compatibility
+    const sortedAll = [...(snapshots || [])].sort(compareTieBreakers);
+    const computedTournamentRankMap = new Map<string, number>();
+    sortedAll.forEach((s, idx) => {
+      computedTournamentRankMap.set(s.team_id, idx + 1);
     });
 
-    // 7. Format entries with rank and movement
+    // 7. Format all entries with domain-specific ranking and movement
     const isDomainFiltered = Boolean(params.domainId);
-    const leaderboard = sortedSnapshots.map((row) => {
+    const allFormattedEntries: PublicLeaderboardRow[] = sortedAll.map((row) => {
       const teamObj = row.teams as unknown as {
         id: string;
         team_code: string;
@@ -1755,18 +1813,19 @@ export class TournamentService {
         domains?: { id: string; code: string; name: string };
       };
 
-      const tournamentRank = Number(row.tournament_rank);
-      const domainRank = Number(row.domain_rank);
+      const tournamentRank = computedTournamentRankMap.get(row.team_id) ?? Number(row.tournament_rank);
+      const domainRank = computedDomainRankMap.get(row.team_id) ?? Number(row.domain_rank);
 
-      // Current display rank: in domain view, domainRank; in global view, tournamentRank
-      const currentRank = isDomainFiltered ? domainRank : tournamentRank;
+      // In Capital Quest, competitors strictly compete within their domain.
+      // A team's public rank is always its intra-domain rank.
+      const currentRank = domainRank;
 
       const priorInfo = priorRankMap.get(row.team_id);
       let previousRank: number | null = null;
       let rankMovement: number | null = null;
 
       if (priorInfo) {
-        previousRank = isDomainFiltered ? priorInfo.domainRank : priorInfo.tournamentRank;
+        previousRank = priorInfo.domainRank;
         rankMovement = previousRank - currentRank;
       }
 
@@ -1788,6 +1847,11 @@ export class TournamentService {
         retainedEquityPct: Number(row.retained_equity_pct),
         equityAdjustedScore: Number(row.equity_adjusted_score),
         finalScore: Number(row.equity_adjusted_score),
+        score: Number(row.equity_adjusted_score),
+        founderEquityPercent: Number(row.retained_equity_pct),
+        cashOnHand: Number(row.ending_cash),
+        revenue: Number(row.gross_revenue),
+        rankChange: rankMovement ?? 0,
         endingCash: Number(row.ending_cash),
         grossRevenue: Number(row.gross_revenue),
         netIncome: Number(row.net_income),
@@ -1799,6 +1863,99 @@ export class TournamentService {
         brandEquityScore: Number(row.brand_equity_score),
       };
     });
+
+    // 8. Partition by the three canonical active business domains
+    const d2cTeams = allFormattedEntries
+      .filter(t => normalizeDomainCode(t.domainCode) === 'd2c')
+      .sort((a, b) => a.domainRank - b.domainRank);
+
+    const healthTeams = allFormattedEntries
+      .filter(t => normalizeDomainCode(t.domainCode) === 'healthtech')
+      .sort((a, b) => a.domainRank - b.domainRank);
+
+    const saasTeams = allFormattedEntries
+      .filter(t => normalizeDomainCode(t.domainCode) === 'saas')
+      .sort((a, b) => a.domainRank - b.domainRank);
+
+    const d2cChamp = d2cTeams.length > 0 ? d2cTeams[0] : null;
+    const healthChamp = healthTeams.length > 0 ? healthTeams[0] : null;
+    const saasChamp = saasTeams.length > 0 ? saasTeams[0] : null;
+
+    const domainStandings: Record<string, PublicLeaderboardRow[]> = {
+      d2c: d2cTeams,
+      healthtech: healthTeams,
+      saas: saasTeams,
+    };
+
+    const domains: DomainLeaderboardSection[] = [
+      {
+        domainCode: 'D2C',
+        domainName: 'D2C Consumer Goods',
+        teams: d2cTeams,
+        champion: d2cChamp,
+      },
+      {
+        domainCode: 'HEALTH',
+        domainName: 'HealthTech & BioDevices',
+        teams: healthTeams,
+        champion: healthChamp,
+      },
+      {
+        domainCode: 'SAAS',
+        domainName: 'Enterprise SaaS & AI',
+        teams: saasTeams,
+        champion: saasChamp,
+      },
+    ];
+
+    // Also include any other domains present (e.g. CleanTech in test mocks)
+    const otherDomainCodes = Array.from(domainGroupMap.keys()).filter(
+      code => !['D2C', 'HEALTH', 'HEALTHTECH', 'SAAS'].includes(code.toUpperCase())
+    );
+    for (const otherCode of otherDomainCodes) {
+      const otherTeams = allFormattedEntries
+        .filter(t => t.domainCode.toUpperCase() === otherCode)
+        .sort((a, b) => a.domainRank - b.domainRank);
+      if (otherTeams.length > 0) {
+        domains.push({
+          domainCode: otherCode,
+          domainName: otherTeams[0].domainName || otherCode,
+          teams: otherTeams,
+          champion: otherTeams[0] || null,
+        });
+        domainStandings[otherCode.toLowerCase()] = otherTeams;
+      }
+    }
+
+    const champions = domains.map(d => ({
+      domainCode: d.domainCode,
+      domainName: d.domainName,
+      champion: d.champion,
+    }));
+
+    // 9. Final Round Champions View logic (Round 5)
+    const isFinalRound = selectedRound.round_number >= finalRoundNumber;
+    const isFinalChampionsView = isFinalRound && !isFinalRoundEmbargoed;
+
+    let leaderboard: PublicLeaderboardRow[];
+
+    if (isDomainFiltered && params.domainId) {
+      leaderboard = allFormattedEntries.filter(r => r.domainId === params.domainId);
+    } else if (isFinalChampionsView && !isOrganizerOrJudge && !params.includeRunnersUp) {
+      // After authorized final reveal, public leaderboard displays ONLY the domain champions!
+      // Exactly one champion per eligible active domain — up to three champions total.
+      // Do not display runners-up in the final public champion view.
+      const activeChampions = [d2cChamp, healthChamp, saasChamp].filter(Boolean) as PublicLeaderboardRow[];
+      if (activeChampions.length === 0 && allFormattedEntries.length > 0) {
+        // Fallback for tests with CleanTech
+        const legacyChamps = domains.map(d => d.champion).filter(Boolean) as PublicLeaderboardRow[];
+        leaderboard = legacyChamps;
+      } else {
+        leaderboard = activeChampions;
+      }
+    } else {
+      leaderboard = allFormattedEntries;
+    }
 
     return {
       event: {
@@ -1812,9 +1969,14 @@ export class TournamentService {
         publishedAt: r.published_at,
       })),
       activeRoundNumber: event.active_round_number ?? 0,
+      roundNumber: selectedRound.round_number,
       selectedRoundNumber: selectedRound.round_number,
       lastUpdated: selectedRound.published_at,
       isFinalRoundEmbargoed,
+      isFinalChampionsView,
+      champions,
+      domainStandings,
+      domains,
       leaderboard,
     };
   }
@@ -3078,12 +3240,23 @@ export class TournamentService {
           eventId: targetEventId,
           roundNumber: finalRoundNumber,
           callerRole: 'super_admin',
+          includeRunnersUp: true,
         });
 
+        const domainChampions = finalLb.domains?.map(d => ({
+          domainCode: d.domainCode,
+          domainName: d.domainName,
+          champion: d.champion,
+        })) || [];
+
         const topThree = finalLb.leaderboard.slice(0, 3);
-        const rank3Winner = topThree.find(w => w.tournamentRank === 3) || topThree[2] || null;
-        const rank2Winner = topThree.find(w => w.tournamentRank === 2) || topThree[1] || null;
-        const rank1Winner = topThree.find(w => w.tournamentRank === 1) || topThree[0] || null;
+        const rawRank3 = topThree.find(w => w.tournamentRank === 3) || topThree[2] || null;
+        const rawRank2 = topThree.find(w => w.tournamentRank === 2) || topThree[1] || null;
+        const rawRank1 = topThree.find(w => w.tournamentRank === 1) || topThree[0] || null;
+
+        const rank3Winner = rawRank3 ? { ...rawRank3, rank: 3 } : null;
+        const rank2Winner = rawRank2 ? { ...rawRank2, rank: 2 } : null;
+        const rank1Winner = rawRank1 ? { ...rawRank1, rank: 1 } : null;
 
         // Embargo filter strictly by ceremonyStage
         if (state.ceremonyStage === 'waiting') {
@@ -3106,7 +3279,7 @@ export class TournamentService {
             message: 'Third Place — Bronze Podium Winner',
           };
         } else if (state.ceremonyStage === 'reveal_second') {
-          const winners = [rank3Winner, rank2Winner].filter(Boolean);
+          const winners = [rank3Winner, rank2Winner].filter(Boolean) as PublicLeaderboardRow[];
           ceremony = {
             isAvailable: true,
             stage: 'reveal_second',
@@ -3116,7 +3289,7 @@ export class TournamentService {
             message: 'Second Place — Silver Podium Winner',
           };
         } else if (state.ceremonyStage === 'reveal_first') {
-          const winners = [rank3Winner, rank2Winner, rank1Winner].filter(Boolean);
+          const winners = [rank3Winner, rank2Winner, rank1Winner].filter(Boolean) as PublicLeaderboardRow[];
           ceremony = {
             isAvailable: true,
             stage: 'reveal_first',
@@ -3126,7 +3299,7 @@ export class TournamentService {
             message: 'Grand Champion — Capital Quest First Place',
           };
         } else if (state.ceremonyStage === 'podium') {
-          const winners = [rank1Winner, rank2Winner, rank3Winner].filter(Boolean);
+          const winners = [rank1Winner, rank2Winner, rank3Winner].filter(Boolean) as PublicLeaderboardRow[];
           ceremony = {
             isAvailable: true,
             stage: 'podium',
@@ -3134,7 +3307,8 @@ export class TournamentService {
             revealedWinners: winners,
             currentReveal: null,
             isPodiumComplete: true,
-            message: 'Official Capital Quest Tournament Podium',
+            domainChampions,
+            message: 'Official Capital Quest Three Domain Champions Showcase',
           };
         }
       }
@@ -3240,14 +3414,34 @@ export class TournamentService {
       .sort((a, b) => b.retainedEquityPct - a.retainedEquityPct)
       .slice(0, 3);
 
+    const mappedValuationGrowthLeaders = valuationGrowthLeaders.map(vg => ({
+      ...vg,
+      growthPercent: vg.valuationGrowthPct,
+      entry: vg,
+    }));
+
+    const mappedDomainLeaders = domainLeaders.map(dl => ({
+      ...dl,
+      domainCode: dl.domainCode,
+      domainName: dl.domainName,
+      leader: dl,
+    }));
+
+    const mappedRankClimbers = rankClimbers.map(rc => ({
+      ...rc,
+      entry: rc,
+      climb: rc.rankMovement ?? 0,
+    }));
+
     return {
       roundNumber,
       topScorers,
       revenueLeaders,
-      valuationGrowthLeaders,
-      rankClimbers,
-      domainLeaders,
+      valuationGrowthLeaders: mappedValuationGrowthLeaders,
+      rankClimbers: mappedRankClimbers,
+      domainLeaders: mappedDomainLeaders,
       equityRetentionStandouts,
+      equityLeaders: equityRetentionStandouts,
     };
   }
 
@@ -3285,13 +3479,21 @@ export class TournamentService {
     const isFinalRoundPublished = Boolean(finalRound);
 
     let topThreeCandidates: PublicLeaderboardRow[] = [];
+    let domainChampions: Array<{
+      domainCode: string;
+      domainName: string;
+      champion: PublicLeaderboardRow | null;
+    }> = [];
+
     if (isFinalRoundPublished) {
       const finalLb = await this.getPublicLeaderboard({
         eventId: targetEventId,
         roundNumber: finalRoundNumber,
         callerRole: 'super_admin',
+        includeRunnersUp: true,
       });
       topThreeCandidates = finalLb.leaderboard.slice(0, 3);
+      domainChampions = finalLb.champions || [];
     }
 
     return {
@@ -3310,6 +3512,8 @@ export class TournamentService {
       finalRoundNumber,
       isFinalRoundPublished,
       topThreeCandidates,
+      topThreeCandidatePreview: topThreeCandidates,
+      domainChampions,
     };
   }
 

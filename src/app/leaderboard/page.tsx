@@ -15,7 +15,7 @@ import {
   Building2,
   DollarSign,
   PieChart,
-  Award,
+  Crown,
   ShieldAlert,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
@@ -51,19 +51,25 @@ interface LeaderboardEntry {
   brandEquityScore: number;
 }
 
-interface PublishedRound {
-  roundNumber: number;
-  publishedAt: string | null;
+interface DomainSection {
+  domainCode: string;
+  domainName: string;
+  teams: LeaderboardEntry[];
+  champion: LeaderboardEntry | null;
 }
 
 interface LeaderboardApiResponse {
   event: { id: string; name: string; status: string } | null;
   hasPublishedRounds: boolean;
-  publishedRounds: PublishedRound[];
+  publishedRounds: { roundNumber: number; publishedAt: string | null }[];
   activeRoundNumber: number;
   selectedRoundNumber: number | null;
   lastUpdated: string | null;
   isFinalRoundEmbargoed?: boolean;
+  isFinalChampionsView?: boolean;
+  champions?: Array<{ domainCode: string; domainName: string; champion: LeaderboardEntry | null }>;
+  domainStandings?: Record<string, LeaderboardEntry[]>;
+  domains?: DomainSection[];
   leaderboard: LeaderboardEntry[];
 }
 
@@ -71,40 +77,33 @@ export default function PublicLeaderboardPage() {
   const [data, setData] = React.useState<LeaderboardApiResponse | null>(null);
   const [isLoading, setIsLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
-  const [selectedRound, setSelectedRound] = React.useState<number | null>(null);
   const [selectedDomain, setSelectedDomain] = React.useState<string>('ALL');
   const [searchQuery, setSearchQuery] = React.useState<string>('');
-  const [sortBy, setSortBy] = React.useState<'score' | 'valuation' | 'revenue' | 'cash' | 'rank'>('score');
-  const [sortDirection, setSortDirection] = React.useState<'asc' | 'desc'>('desc');
+  const [sortBy, setSortBy] = React.useState<'score' | 'valuation' | 'revenue' | 'cash' | 'rank'>('rank');
+  const [sortDirection, setSortDirection] = React.useState<'asc' | 'desc'>('asc');
 
-  const fetchLeaderboard = React.useCallback(async (roundNum?: number | null) => {
+  const fetchLeaderboard = React.useCallback(async () => {
     setIsLoading(true);
     setError(null);
     try {
-      const url = new URL('/api/leaderboard', window.location.origin);
-      if (roundNum !== undefined && roundNum !== null) {
-        url.searchParams.set('roundNumber', roundNum.toString());
-      }
-      const res = await fetch(url.toString());
+      // Public leaderboard strictly displays the latest published round results
+      const res = await fetch('/api/leaderboard');
       const json = await res.json();
       if (!res.ok || !json.success) {
         throw new Error(json.error?.message || 'Failed to load tournament leaderboard');
       }
       setData(json.data);
-      if (selectedRound === null && json.data.selectedRoundNumber) {
-        setSelectedRound(json.data.selectedRoundNumber);
-      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to connect to simulation server';
       setError(msg);
     } finally {
       setIsLoading(false);
     }
-  }, [selectedRound]);
+  }, []);
 
   React.useEffect(() => {
-    fetchLeaderboard(selectedRound);
-  }, [selectedRound, fetchLeaderboard]);
+    fetchLeaderboard();
+  }, [fetchLeaderboard]);
 
   const formatCurrency = (val: number, decimals: number = 0) => {
     return new Intl.NumberFormat('en-US', {
@@ -129,78 +128,101 @@ export default function PublicLeaderboardPage() {
     }
   };
 
-  // Filter and sort items
-  const filteredEntries = React.useMemo(() => {
-    if (!data?.leaderboard) return [];
+  // Sort and filter helper for each domain's teams
+  const sortAndFilterTeams = React.useCallback(
+    (teams: LeaderboardEntry[]) => {
+      let list = [...teams];
 
-    let list = [...data.leaderboard];
-
-    // Filter by Domain
-    if (selectedDomain !== 'ALL') {
-      list = list.filter(
-        item => item.domainCode.toUpperCase() === selectedDomain || item.domainName.toLowerCase().includes(selectedDomain.toLowerCase())
-      );
-    }
-
-    // Filter by Search Query
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      list = list.filter(
-        item =>
-          item.companyName.toLowerCase().includes(q) ||
-          item.teamCode.toLowerCase().includes(q) ||
-          (item.tableStation && item.tableStation.toLowerCase().includes(q))
-      );
-    }
-
-    // Sort
-    list.sort((a, b) => {
-      let comp = 0;
-      if (sortBy === 'score') {
-        comp = b.finalScore - a.finalScore;
-      } else if (sortBy === 'valuation') {
-        comp = b.valuation - a.valuation;
-      } else if (sortBy === 'revenue') {
-        comp = b.grossRevenue - a.grossRevenue;
-      } else if (sortBy === 'cash') {
-        comp = b.endingCash - a.endingCash;
-      } else if (sortBy === 'rank') {
-        comp = a.rank - b.rank;
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        list = list.filter(
+          item =>
+            item.companyName.toLowerCase().includes(q) ||
+            item.teamCode.toLowerCase().includes(q) ||
+            (item.tableStation && item.tableStation.toLowerCase().includes(q))
+        );
       }
 
-      // Tie breaker fallback: finalScore DESC, valuation DESC, teamId ASC
-      if (comp === 0) {
-        const scoreDiff = b.finalScore - a.finalScore;
-        if (scoreDiff !== 0) return scoreDiff;
-        const valDiff = b.valuation - a.valuation;
-        if (valDiff !== 0) return valDiff;
-        return a.teamCode.localeCompare(b.teamCode);
-      }
+      list.sort((a, b) => {
+        let comp = 0;
+        if (sortBy === 'score') {
+          comp = b.finalScore - a.finalScore;
+        } else if (sortBy === 'valuation') {
+          comp = b.valuation - a.valuation;
+        } else if (sortBy === 'revenue') {
+          comp = b.grossRevenue - a.grossRevenue;
+        } else if (sortBy === 'cash') {
+          comp = b.endingCash - a.endingCash;
+        } else if (sortBy === 'rank') {
+          comp = a.domainRank - b.domainRank;
+        }
 
-      return sortDirection === 'desc' ? comp : -comp;
-    });
+        // Deterministic fallback: finalScore DESC, valuation DESC, teamCode ASC
+        if (comp === 0) {
+          const scoreDiff = b.finalScore - a.finalScore;
+          if (scoreDiff !== 0) return scoreDiff;
+          const valDiff = b.valuation - a.valuation;
+          if (valDiff !== 0) return valDiff;
+          return a.teamCode.localeCompare(b.teamCode);
+        }
 
-    return list;
-  }, [data?.leaderboard, selectedDomain, searchQuery, sortBy, sortDirection]);
+        return sortDirection === 'desc' ? comp : -comp;
+      });
+
+      return list;
+    },
+    [searchQuery, sortBy, sortDirection]
+  );
+
+  // Determine active domains to render
+  const domainSections = React.useMemo(() => {
+    if (!data) return [];
+
+    // Fallback: If `domains` not present on API response, construct from leaderboard
+    let sections: DomainSection[] = [];
+    if (data.domains && data.domains.length > 0) {
+      sections = data.domains;
+    } else {
+      const canonical = [
+        { code: 'D2C', name: 'D2C Consumer Goods' },
+        { code: 'HEALTH', name: 'HealthTech & BioDevices' },
+        { code: 'SAAS', name: 'Enterprise SaaS & AI' },
+      ];
+      sections = canonical.map(c => {
+        const matching = (data.leaderboard || []).filter(
+          t => t.domainCode.toUpperCase() === c.code || t.domainName.toLowerCase().includes(c.code.toLowerCase())
+        );
+        return {
+          domainCode: c.code,
+          domainName: c.name,
+          teams: matching,
+          champion: matching.length > 0 ? matching[0] : null,
+        };
+      });
+    }
+
+    if (selectedDomain === 'ALL') {
+      return sections;
+    }
+
+    return sections.filter(
+      s => s.domainCode.toUpperCase() === selectedDomain || s.domainName.toLowerCase().includes(selectedDomain.toLowerCase())
+    );
+  }, [data, selectedDomain]);
 
   // Aggregate stats
   const tournamentStats = React.useMemo(() => {
     if (!data?.leaderboard || data.leaderboard.length === 0) return null;
-    const topScore = Math.max(...data.leaderboard.map(i => i.finalScore));
     const totalValuation = data.leaderboard.reduce((acc, i) => acc + i.valuation, 0);
     const avgEquity = data.leaderboard.reduce((acc, i) => acc + i.retainedEquityPct, 0) / data.leaderboard.length;
     return {
-      topScore,
       totalValuation,
       avgEquity,
       totalTeams: data.leaderboard.length,
     };
   }, [data?.leaderboard]);
 
-  const topThree = React.useMemo(() => {
-    if (!data?.leaderboard || data.leaderboard.length === 0) return [];
-    return data.leaderboard.slice(0, 3);
-  }, [data?.leaderboard]);
+  const isFinalChampionsView = Boolean(data?.isFinalChampionsView);
 
   return (
     <div className="min-h-screen bg-[#070A12] text-slate-100 flex flex-col font-sans selection:bg-indigo-500/30 selection:text-indigo-200">
@@ -231,7 +253,7 @@ export default function PublicLeaderboardPage() {
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => fetchLeaderboard(selectedRound)}
+            onClick={fetchLeaderboard}
             disabled={isLoading}
             className="text-xs text-slate-400 hover:text-slate-200 h-8 px-2.5 gap-1.5"
             title="Refresh official rankings"
@@ -256,43 +278,48 @@ export default function PublicLeaderboardPage() {
             <div className="space-y-2">
               <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-emerald-400 text-xs font-mono font-semibold">
                 <Sparkles className="h-3.5 w-3.5" />
-                <span>Deterministic Verification Engine Active</span>
+                <span>Three Independent Competition Domains</span>
               </div>
               <h1 className="text-3xl sm:text-4xl font-extrabold tracking-tight text-white">
-                Tournament <span className="text-emerald-400">Standings</span> & Final Scores
+                {isFinalChampionsView ? (
+                  <>
+                    Capital Quest <span className="text-amber-400">Tournament Champions</span>
+                  </>
+                ) : (
+                  <>
+                    Round {data?.selectedRoundNumber ?? 1}{' '}
+                    <span className="text-emerald-400">Domain Standings</span>
+                  </>
+                )}
               </h1>
               <p className="text-sm text-slate-400 max-w-2xl leading-relaxed">
-                Official competitive rankings calculated as{' '}
-                <span className="font-mono font-semibold text-amber-300">
-                  Company Valuation × Founder Retained Equity %
-                </span>
-                . Only fully verified and published simulation snapshots are reflected.
+                {isFinalChampionsView ? (
+                  <>
+                    Official champions determined independently across the three active business domains using the
+                    final equity-adjusted scoring formula and established tie-breakers.
+                  </>
+                ) : (
+                  <>
+                    Official independent domain rankings calculated as{' '}
+                    <span className="font-mono font-semibold text-amber-300">
+                      Company Valuation × Founder Retained Equity %
+                    </span>
+                    . Ventures compete strictly within their assigned industry domain.
+                  </>
+                )}
               </p>
             </div>
 
-            {/* ROUND SELECTOR PILL GROUP */}
-            {data?.hasPublishedRounds && data.publishedRounds.length > 0 && (
-              <div className="flex flex-col items-start md:items-end gap-1.5 bg-slate-950/80 p-3 rounded-xl border border-slate-800 shadow-inner">
+            {/* ROUND STATUS CARD */}
+            {data?.hasPublishedRounds && (
+              <div className="flex flex-col items-start md:items-end gap-1.5 bg-slate-950/80 p-3.5 rounded-xl border border-slate-800 shadow-inner">
                 <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
-                  Published Rounds
+                  Current Public View
                 </span>
-                <div className="flex flex-wrap gap-1.5">
-                  {data.publishedRounds.map(r => {
-                    const isSelected = selectedRound === r.roundNumber;
-                    return (
-                      <button
-                        key={r.roundNumber}
-                        onClick={() => setSelectedRound(r.roundNumber)}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                          isSelected
-                            ? 'bg-emerald-600 text-white shadow-md shadow-emerald-950 border border-emerald-400/40'
-                            : 'bg-slate-900 text-slate-400 hover:text-slate-200 hover:bg-slate-800 border border-slate-800'
-                        }`}
-                      >
-                        Round {r.roundNumber}
-                      </button>
-                    );
-                  })}
+                <div className="flex items-center gap-2">
+                  <span className="px-3 py-1 rounded-lg text-xs font-bold bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 font-mono">
+                    {isFinalChampionsView ? 'GRAND FINALE CHAMPIONS' : `ROUND ${data.selectedRoundNumber} STANDINGS`}
+                  </span>
                 </div>
                 {data.lastUpdated && (
                   <span className="text-[10px] text-slate-500 font-mono">
@@ -310,8 +337,8 @@ export default function PublicLeaderboardPage() {
               <div>
                 <div className="font-bold text-amber-200 text-sm">Final Round Results Embargoed — Winner Reveal in Progress</div>
                 <div className="text-amber-300/80 mt-1 leading-relaxed">
-                  Final tournament rankings and champion scores are currently under controlled announcement on the main stage. 
-                  Displaying results through Round {data.selectedRoundNumber}. Official final standings will unlock here upon conclusion of the podium reveal ceremony.
+                  Final tournament rankings and domain champions are currently under controlled announcement on the main stage. 
+                  Displaying verified standings through Round {data.selectedRoundNumber}. Official final domain champions will unlock here upon conclusion of the reveal ceremony.
                 </div>
               </div>
             </div>
@@ -319,27 +346,16 @@ export default function PublicLeaderboardPage() {
 
           {/* KPI CARDS */}
           {tournamentStats && (
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
-              <div className="p-4 rounded-xl border border-slate-800/80 bg-slate-900/50 backdrop-blur">
-                <div className="flex items-center gap-2 text-amber-400 text-xs font-semibold uppercase">
-                  <Award className="h-4 w-4" />
-                  <span>Leader Score</span>
-                </div>
-                <div className="text-xl sm:text-2xl font-bold font-mono text-white mt-1">
-                  {formatCurrency(tournamentStats.topScore)}
-                </div>
-                <div className="text-[11px] text-slate-500 mt-0.5">Top venture score</div>
-              </div>
-
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 pt-2">
               <div className="p-4 rounded-xl border border-slate-800/80 bg-slate-900/50 backdrop-blur">
                 <div className="flex items-center gap-2 text-indigo-400 text-xs font-semibold uppercase">
                   <Building2 className="h-4 w-4" />
-                  <span>Active Ventures</span>
+                  <span>Independent Domains</span>
                 </div>
                 <div className="text-xl sm:text-2xl font-bold font-mono text-white mt-1">
-                  {tournamentStats.totalTeams} Teams
+                  3 Competitions
                 </div>
-                <div className="text-[11px] text-slate-500 mt-0.5">Across 4 domains</div>
+                <div className="text-[11px] text-slate-500 mt-0.5">D2C • HealthTech • SaaS & AI</div>
               </div>
 
               <div className="p-4 rounded-xl border border-slate-800/80 bg-slate-900/50 backdrop-blur">
@@ -350,18 +366,18 @@ export default function PublicLeaderboardPage() {
                 <div className="text-xl sm:text-2xl font-bold font-mono text-white mt-1">
                   {formatCurrency(tournamentStats.totalValuation)}
                 </div>
-                <div className="text-[11px] text-slate-500 mt-0.5">Aggregated market worth</div>
+                <div className="text-[11px] text-slate-500 mt-0.5">Aggregated venture worth</div>
               </div>
 
               <div className="p-4 rounded-xl border border-slate-800/80 bg-slate-900/50 backdrop-blur">
                 <div className="flex items-center gap-2 text-sky-400 text-xs font-semibold uppercase">
                   <PieChart className="h-4 w-4" />
-                  <span>Average Equity</span>
+                  <span>Average Founder Equity</span>
                 </div>
                 <div className="text-xl sm:text-2xl font-bold font-mono text-white mt-1">
                   {formatPercent(tournamentStats.avgEquity)}
                 </div>
-                <div className="text-[11px] text-slate-500 mt-0.5">Founder retention avg</div>
+                <div className="text-[11px] text-slate-500 mt-0.5">Founder retention across fields</div>
               </div>
             </div>
           )}
@@ -369,15 +385,15 @@ export default function PublicLeaderboardPage() {
       </section>
 
       {/* 3. MAIN CONTENT AREA */}
-      <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+      <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-6 space-y-8">
         {error && (
           <div className="p-4 rounded-xl border border-rose-500/30 bg-rose-500/10 text-rose-300 text-xs">
             {error}
           </div>
         )}
 
-        {/* EMPTY STATE */}
-        {!isLoading && (!data || !data.hasPublishedRounds || data.leaderboard.length === 0) && (
+        {/* EMPTY STATE: NO PUBLISHED ROUNDS */}
+        {!isLoading && (!data || !data.hasPublishedRounds || (data.leaderboard.length === 0 && (!data.domains || data.domains.length === 0))) && (
           <div className="py-20 text-center space-y-4 max-w-md mx-auto">
             <div className="h-16 w-16 mx-auto rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-500">
               <Trophy className="h-8 w-8 text-amber-500/50" />
@@ -390,7 +406,7 @@ export default function PublicLeaderboardPage() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => fetchLeaderboard(null)}
+                onClick={fetchLeaderboard}
                 className="text-xs gap-1.5"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
@@ -400,93 +416,143 @@ export default function PublicLeaderboardPage() {
           </div>
         )}
 
-        {/* PODIUM TOP 3 CARDS (SHOWN ON GLOBAL ALL DOMAINS VIEW) */}
-        {!isLoading && selectedDomain === 'ALL' && topThree.length >= 3 && !searchQuery && (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-xs font-semibold text-slate-400 uppercase tracking-wider">
-                <Award className="h-4 w-4 text-amber-400" />
-                <span>Tournament Podium Leaders</span>
+        {/* FINAL CHAMPIONS SHOWCASE (ROUND 5 REVEALED) */}
+        {!isLoading && isFinalChampionsView && data?.hasPublishedRounds && (
+          <div className="space-y-6">
+            <div className="text-center space-y-2 py-4">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-amber-500/40 bg-amber-500/10 text-amber-400 text-xs font-mono font-bold">
+                <Crown className="h-4 w-4" />
+                <span>OFFICIAL TOURNAMENT CHAMPIONS</span>
               </div>
+              <h2 className="text-2xl sm:text-3xl font-black text-white tracking-tight">
+                Independent Domain Champions
+              </h2>
+              <p className="text-xs text-slate-400 max-w-xl mx-auto">
+                Each domain represents an independent competitive track. Exactly one final champion is awarded per active domain.
+              </p>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              {topThree.map((item, idx) => {
-                const podiumColors = [
-                  'border-amber-500/40 bg-gradient-to-b from-amber-500/10 via-slate-950 to-slate-950', // #1 Gold
-                  'border-slate-400/40 bg-gradient-to-b from-slate-400/10 via-slate-950 to-slate-950', // #2 Silver
-                  'border-amber-700/40 bg-gradient-to-b from-amber-800/10 via-slate-950 to-slate-950', // #3 Bronze
-                ];
-                const medalBadges = ['🥇 RANK 1', '🥈 RANK 2', '🥉 RANK 3'];
+            {/* THREE CHAMPION CARDS */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              {[
+                { code: 'D2C', name: 'D2C Consumer Goods', badgeBg: 'from-amber-500/20 via-slate-900 to-slate-950', border: 'border-amber-500/50' },
+                { code: 'HEALTH', name: 'HealthTech & BioDevices', badgeBg: 'from-emerald-500/20 via-slate-900 to-slate-950', border: 'border-emerald-500/50' },
+                { code: 'SAAS', name: 'Enterprise SaaS & AI', badgeBg: 'from-indigo-500/20 via-slate-900 to-slate-950', border: 'border-indigo-500/50' },
+              ].map(domainMeta => {
+                const champObj = data.champions?.find(
+                  c => c.domainCode.toUpperCase() === domainMeta.code || c.domainName.toLowerCase().includes(domainMeta.code.toLowerCase())
+                );
+                const champ = champObj?.champion;
+
+                if (!champ) {
+                  return (
+                    <div
+                      key={domainMeta.code}
+                      className="p-6 rounded-2xl border border-slate-800 bg-slate-950/60 text-center space-y-3 flex flex-col justify-center min-h-[300px]"
+                    >
+                      <div className="text-xs font-mono font-bold uppercase text-slate-500 tracking-wider">
+                        {domainMeta.name}
+                      </div>
+                      <div className="text-slate-600 text-sm font-semibold">No Competing Teams</div>
+                      <p className="text-xs text-slate-600 leading-relaxed max-w-xs mx-auto">
+                        No eligible ventures registered in this domain. No champion awarded.
+                      </p>
+                    </div>
+                  );
+                }
 
                 return (
-                  <Link
-                    key={item.teamId}
-                    href={`/companies/${item.companyId}`}
-                    className={`p-4 rounded-xl border transition-all hover:scale-[1.01] hover:border-indigo-500/50 group ${podiumColors[idx]}`}
+                  <div
+                    key={domainMeta.code}
+                    className={`p-6 rounded-2xl border ${domainMeta.border} bg-gradient-to-b ${domainMeta.badgeBg} shadow-2xl space-y-5 flex flex-col justify-between relative overflow-hidden`}
                   >
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold font-mono text-amber-300">
-                        {medalBadges[idx]}
-                      </span>
-                      <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-slate-300">
-                        {item.domainCode}
-                      </span>
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="inline-flex items-center gap-1.5 text-xs font-black font-mono px-2.5 py-1 rounded-md bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                          <Crown className="h-3.5 w-3.5" />
+                          <span>CHAMPION</span>
+                        </span>
+                        <span className="text-[11px] font-mono font-bold text-slate-400 uppercase">
+                          {domainMeta.code}
+                        </span>
+                      </div>
+
+                      <div>
+                        <div className="text-xs font-mono uppercase text-slate-400 font-bold tracking-wider">
+                          {domainMeta.name}
+                        </div>
+                        <h3 className="text-2xl font-black text-white tracking-tight mt-1">
+                          {champ.companyName}
+                        </h3>
+                        <div className="text-xs font-mono text-slate-400 mt-0.5">
+                          Code: {champ.teamCode} {champ.tableStation ? `• Station ${champ.tableStation}` : ''}
+                        </div>
+                      </div>
                     </div>
 
-                    <div className="mt-3">
-                      <div className="text-base font-bold text-white group-hover:text-emerald-400 transition-colors flex items-center gap-1.5">
-                        <span>{item.companyName}</span>
-                        <ChevronRight className="h-4 w-4 text-slate-600 group-hover:text-emerald-400 transition-transform group-hover:translate-x-0.5" />
+                    <div className="space-y-3 pt-4 border-t border-slate-800/80">
+                      <div>
+                        <span className="text-[10px] uppercase text-slate-400 font-semibold block">Final Equity-Adjusted Score</span>
+                        <span className="text-2xl font-black font-mono text-amber-400">
+                          {formatCurrency(champ.finalScore)}
+                        </span>
                       </div>
-                      <div className="text-xs text-slate-400 font-mono mt-0.5">
-                        Code: {item.teamCode} {item.tableStation ? `• Station ${item.tableStation}` : ''}
-                      </div>
-                    </div>
 
-                    <div className="mt-4 pt-3 border-t border-slate-800/80 grid grid-cols-2 gap-2 text-xs">
-                      <div>
-                        <span className="text-[10px] uppercase text-slate-500 block">Final Score</span>
-                        <span className="text-base font-extrabold font-mono text-amber-400">
-                          {formatCurrency(item.finalScore)}
-                        </span>
+                      <div className="grid grid-cols-2 gap-2 text-xs pt-1">
+                        <div>
+                          <span className="text-[10px] uppercase text-slate-500 block">Valuation</span>
+                          <span className="font-bold font-mono text-indigo-300">
+                            {formatCurrency(champ.valuation)}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[10px] uppercase text-slate-500 block">Retained Equity</span>
+                          <span className="font-bold font-mono text-slate-200">
+                            {formatPercent(champ.retainedEquityPct)}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[10px] uppercase text-slate-500 block">Ending Cash</span>
+                          <span className="font-semibold font-mono text-sky-400">
+                            {formatCurrency(champ.endingCash)}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[10px] uppercase text-slate-500 block">Gross Revenue</span>
+                          <span className="font-semibold font-mono text-emerald-400">
+                            {formatCurrency(champ.grossRevenue)}
+                          </span>
+                        </div>
                       </div>
-                      <div>
-                        <span className="text-[10px] uppercase text-slate-500 block">Valuation</span>
-                        <span className="text-sm font-bold font-mono text-indigo-300">
-                          {formatCurrency(item.valuation)}
-                        </span>
-                      </div>
-                      <div>
-                        <span className="text-[10px] uppercase text-slate-500 block">Retained Equity</span>
-                        <span className="text-xs font-semibold font-mono text-slate-300">
-                          {formatPercent(item.retainedEquityPct)}
-                        </span>
-                      </div>
-                      <div>
-                        <span className="text-[10px] uppercase text-slate-500 block">Ending Cash</span>
-                        <span className="text-xs font-semibold font-mono text-sky-400">
-                          {formatCurrency(item.endingCash)}
-                        </span>
+
+                      <div className="pt-2">
+                        <Link
+                          href={`/companies/${champ.companyId}`}
+                          className="w-full inline-flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-slate-900 hover:bg-indigo-600 border border-slate-800 text-xs font-semibold text-slate-300 hover:text-white transition-all shadow-sm"
+                        >
+                          <span>View Official Dossier</span>
+                          <ChevronRight className="h-3.5 w-3.5" />
+                        </Link>
                       </div>
                     </div>
-                  </Link>
+                  </div>
                 );
               })}
             </div>
           </div>
         )}
 
-        {/* 4. FILTER CONTROLS & SEARCH */}
-        {data?.hasPublishedRounds && (
-          <div className="space-y-4">
+        {/* ROUNDS 1-4: INDEPENDENT DOMAIN SECTIONS */}
+        {!isLoading && !isFinalChampionsView && data?.hasPublishedRounds && (
+          <div className="space-y-6">
+            {/* FILTER CONTROLS & SEARCH */}
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
               {/* DOMAIN TABS */}
               <div className="flex flex-wrap gap-1 p-1 rounded-xl bg-slate-900 border border-slate-800 text-xs">
                 {[
                   { id: 'ALL', label: 'All Domains' },
                   { id: 'D2C', label: 'D2C' },
-                  { id: 'HEALTHTECH', label: 'HealthTech' },
+                  { id: 'HEALTH', label: 'HealthTech' },
                   { id: 'SAAS', label: 'Enterprise SaaS & AI' },
                 ].map(d => (
                   <button
@@ -515,211 +581,232 @@ export default function PublicLeaderboardPage() {
               </div>
             </div>
 
-            {/* 5. LEADERBOARD TABLE */}
-            <div className="rounded-xl border border-slate-800 bg-[#0B101E]/80 backdrop-blur overflow-hidden shadow-xl">
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs text-left">
-                  <thead className="bg-[#0E1526] text-slate-400 font-semibold uppercase tracking-wider text-[11px] border-b border-slate-800 select-none">
-                    <tr>
-                      <th
-                        onClick={() => {
-                          setSortBy('rank');
-                          setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
-                        }}
-                        className="py-3 px-4 text-center cursor-pointer hover:text-slate-200 w-20"
-                      >
-                        Rank
-                      </th>
-                      <th className="py-3 px-4">Company Name & Domain</th>
-                      <th
-                        onClick={() => {
-                          setSortBy('valuation');
-                          setSortDirection(sortDirection === 'desc' ? 'asc' : 'desc');
-                        }}
-                        className="py-3 px-4 text-right cursor-pointer hover:text-slate-200"
-                      >
-                        Valuation
-                      </th>
-                      <th className="py-3 px-4 text-right">Founder Equity</th>
-                      <th
-                        onClick={() => {
-                          setSortBy('score');
-                          setSortDirection(sortDirection === 'desc' ? 'asc' : 'desc');
-                        }}
-                        className="py-3 px-4 text-right cursor-pointer hover:text-slate-200 font-bold text-amber-400"
-                      >
-                        Final Score
-                      </th>
-                      <th
-                        onClick={() => {
-                          setSortBy('revenue');
-                          setSortDirection(sortDirection === 'desc' ? 'asc' : 'desc');
-                        }}
-                        className="py-3 px-4 text-right cursor-pointer hover:text-slate-200 hidden md:table-cell"
-                      >
-                        Revenue
-                      </th>
-                      <th
-                        onClick={() => {
-                          setSortBy('cash');
-                          setSortDirection(sortDirection === 'desc' ? 'asc' : 'desc');
-                        }}
-                        className="py-3 px-4 text-right cursor-pointer hover:text-slate-200 hidden lg:table-cell"
-                      >
-                        Ending Cash
-                      </th>
-                      <th className="py-3 px-4 text-right hidden xl:table-cell">Net Income</th>
-                      <th className="py-3 px-4 text-center w-16">Dossier</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800/60 font-mono">
-                    {isLoading ? (
-                      <tr>
-                        <td colSpan={9} className="py-12 text-center text-slate-400 text-xs">
-                          <RefreshCw className="h-6 w-6 animate-spin mx-auto text-sky-400 mb-2" />
-                          <span>Loading official published standings...</span>
-                        </td>
-                      </tr>
-                    ) : filteredEntries.length === 0 ? (
-                      <tr>
-                        <td colSpan={9} className="py-10 text-center text-slate-500 text-xs font-sans">
-                          No company records found matching your filters.
-                        </td>
-                      </tr>
-                    ) : (
-                      filteredEntries.map(item => {
-                        const isTopThree = item.rank <= 3;
-                        return (
-                          <tr
-                            key={item.teamId}
-                            className={`hover:bg-slate-800/40 transition-colors group cursor-pointer ${
-                              isTopThree ? 'bg-indigo-950/10' : ''
-                            }`}
-                          >
-                            {/* RANK & MOVEMENT */}
-                            <td className="py-3.5 px-4 text-center">
-                              <div className="flex flex-col items-center justify-center">
-                                <span
-                                  className={`text-sm font-extrabold ${
-                                    item.rank === 1
-                                      ? 'text-amber-400 font-black'
-                                      : item.rank === 2
-                                      ? 'text-slate-200'
-                                      : item.rank === 3
-                                      ? 'text-amber-600'
-                                      : 'text-slate-400'
+            {/* SEPARATE DOMAIN SECTIONS */}
+            <div className="space-y-8">
+              {domainSections.map(section => {
+                const filteredTeams = sortAndFilterTeams(section.teams);
+
+                return (
+                  <section
+                    key={section.domainCode}
+                    className="rounded-2xl border border-slate-800/80 bg-[#0B101E]/80 backdrop-blur overflow-hidden shadow-xl"
+                  >
+                    {/* DOMAIN SECTION HEADER */}
+                    <div className="px-5 py-4 border-b border-slate-800/80 bg-gradient-to-r from-[#0E1526] via-[#0B101E] to-[#0E1526] flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <div className="flex items-center gap-3">
+                        <span className="px-2.5 py-1 rounded-md text-[11px] font-black font-mono bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                          {section.domainCode}
+                        </span>
+                        <div>
+                          <h2 className="text-base font-extrabold text-white tracking-tight">
+                            {section.domainName}
+                          </h2>
+                          <p className="text-[11px] text-slate-400">
+                            Independent competition track • Ranked strictly against peer ventures
+                          </p>
+                        </div>
+                      </div>
+                      <div className="text-xs font-mono font-semibold text-slate-400">
+                        {section.teams.length} {section.teams.length === 1 ? 'Venture' : 'Ventures'} Competing
+                      </div>
+                    </div>
+
+                    {/* DOMAIN LEADERBOARD TABLE */}
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs text-left">
+                        <thead className="bg-[#0E1526] text-slate-400 font-semibold uppercase tracking-wider text-[11px] border-b border-slate-800 select-none">
+                          <tr>
+                            <th
+                              onClick={() => {
+                                setSortBy('rank');
+                                setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
+                              }}
+                              className="py-3 px-4 text-center cursor-pointer hover:text-slate-200 w-20"
+                            >
+                              Rank
+                            </th>
+                            <th className="py-3 px-4">Company Name & Identifier</th>
+                            <th
+                              onClick={() => {
+                                setSortBy('valuation');
+                                setSortDirection(sortDirection === 'desc' ? 'asc' : 'desc');
+                              }}
+                              className="py-3 px-4 text-right cursor-pointer hover:text-slate-200"
+                            >
+                              Valuation
+                            </th>
+                            <th className="py-3 px-4 text-right">Founder Equity</th>
+                            <th
+                              onClick={() => {
+                                setSortBy('score');
+                                setSortDirection(sortDirection === 'desc' ? 'asc' : 'desc');
+                              }}
+                              className="py-3 px-4 text-right cursor-pointer hover:text-slate-200 font-bold text-amber-400"
+                            >
+                              Final Score
+                            </th>
+                            <th
+                              onClick={() => {
+                                setSortBy('revenue');
+                                setSortDirection(sortDirection === 'desc' ? 'asc' : 'desc');
+                              }}
+                              className="py-3 px-4 text-right cursor-pointer hover:text-slate-200 hidden md:table-cell"
+                            >
+                              Revenue
+                            </th>
+                            <th
+                              onClick={() => {
+                                setSortBy('cash');
+                                setSortDirection(sortDirection === 'desc' ? 'asc' : 'desc');
+                              }}
+                              className="py-3 px-4 text-right cursor-pointer hover:text-slate-200 hidden lg:table-cell"
+                            >
+                              Ending Cash
+                            </th>
+                            <th className="py-3 px-4 text-right hidden xl:table-cell">Net Income</th>
+                            <th className="py-3 px-4 text-center w-16">Dossier</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800/60 font-mono">
+                          {filteredTeams.length === 0 ? (
+                            <tr>
+                              <td colSpan={9} className="py-8 text-center text-slate-500 text-xs font-sans">
+                                {section.teams.length === 0
+                                  ? `No competing ventures registered in ${section.domainName}.`
+                                  : 'No ventures matching search query in this domain.'}
+                              </td>
+                            </tr>
+                          ) : (
+                            filteredTeams.map((item) => {
+                              const isTop = item.domainRank === 1;
+                              return (
+                                <tr
+                                  key={item.teamId}
+                                  className={`hover:bg-slate-800/40 transition-colors group cursor-pointer ${
+                                    isTop ? 'bg-amber-950/10' : ''
                                   }`}
                                 >
-                                  #{item.rank}
-                                </span>
-                                {/* Movement Indicator */}
-                                {item.rankMovement !== null ? (
-                                  item.rankMovement > 0 ? (
-                                    <span
-                                      className="inline-flex items-center text-[10px] font-bold text-emerald-400"
-                                      title={`Moved up ${item.rankMovement} positions`}
+                                  {/* RANK & MOVEMENT (WITHIN DOMAIN) */}
+                                  <td className="py-3.5 px-4 text-center">
+                                    <div className="flex flex-col items-center justify-center">
+                                      <span
+                                        className={`text-sm font-extrabold ${
+                                          item.domainRank === 1
+                                            ? 'text-amber-400 font-black'
+                                            : item.domainRank === 2
+                                            ? 'text-slate-200'
+                                            : item.domainRank === 3
+                                            ? 'text-amber-600'
+                                            : 'text-slate-400'
+                                        }`}
+                                      >
+                                        #{item.domainRank}
+                                      </span>
+                                      {/* Movement Indicator within domain */}
+                                      {item.rankMovement !== null ? (
+                                        item.rankMovement > 0 ? (
+                                          <span
+                                            className="inline-flex items-center text-[10px] font-bold text-emerald-400"
+                                            title={`Moved up ${item.rankMovement} position(s) in ${section.domainCode}`}
+                                          >
+                                            <ArrowUpRight className="h-3 w-3" />
+                                            {item.rankMovement}
+                                          </span>
+                                        ) : item.rankMovement < 0 ? (
+                                          <span
+                                            className="inline-flex items-center text-[10px] font-bold text-rose-400"
+                                            title={`Moved down ${Math.abs(item.rankMovement)} position(s) in ${section.domainCode}`}
+                                          >
+                                            <ArrowDownRight className="h-3 w-3" />
+                                            {Math.abs(item.rankMovement)}
+                                          </span>
+                                        ) : (
+                                          <span className="inline-flex items-center text-[10px] text-slate-500" title="Unchanged domain rank">
+                                            <Minus className="h-3 w-3" />
+                                          </span>
+                                        )
+                                      ) : (
+                                        <span className="text-[9px] text-indigo-400/80 font-sans font-semibold">NEW</span>
+                                      )}
+                                    </div>
+                                  </td>
+
+                                  {/* COMPANY NAME & IDENTIFIER */}
+                                  <td className="py-3.5 px-4 font-sans">
+                                    <Link
+                                      href={`/companies/${item.companyId}`}
+                                      className="block group-hover:text-emerald-300 transition-colors"
                                     >
-                                      <ArrowUpRight className="h-3 w-3" />
-                                      {item.rankMovement}
-                                    </span>
-                                  ) : item.rankMovement < 0 ? (
-                                    <span
-                                      className="inline-flex items-center text-[10px] font-bold text-rose-400"
-                                      title={`Moved down ${Math.abs(item.rankMovement)} positions`}
+                                      <div className="font-bold text-white text-sm flex items-center gap-1.5">
+                                        <span>{item.companyName}</span>
+                                        {item.tableStation && (
+                                          <span className="text-[10px] font-mono text-slate-400 bg-slate-950 px-1 py-0.2 rounded border border-slate-800">
+                                            {item.tableStation}
+                                          </span>
+                                        )}
+                                      </div>
+                                      <div className="text-[11px] text-slate-400 flex items-center gap-2 mt-0.5">
+                                        <span className="font-mono text-sky-400 font-semibold">{item.teamCode}</span>
+                                        <span>•</span>
+                                        <span className="text-slate-400">{section.domainName}</span>
+                                      </div>
+                                    </Link>
+                                  </td>
+
+                                  {/* VALUATION */}
+                                  <td className="py-3.5 px-4 text-right text-indigo-200 font-semibold">
+                                    {formatCurrency(item.valuation)}
+                                  </td>
+
+                                  {/* RETAINED EQUITY */}
+                                  <td className="py-3.5 px-4 text-right text-slate-300">
+                                    {formatPercent(item.retainedEquityPct)}
+                                  </td>
+
+                                  {/* FINAL SCORE */}
+                                  <td className="py-3.5 px-4 text-right font-extrabold text-amber-400 text-sm">
+                                    {formatCurrency(item.finalScore)}
+                                  </td>
+
+                                  {/* REVENUE */}
+                                  <td className="py-3.5 px-4 text-right text-emerald-400 font-semibold hidden md:table-cell">
+                                    {formatCurrency(item.grossRevenue)}
+                                  </td>
+
+                                  {/* ENDING CASH */}
+                                  <td className="py-3.5 px-4 text-right text-sky-300 font-semibold hidden lg:table-cell">
+                                    {formatCurrency(item.endingCash)}
+                                  </td>
+
+                                  {/* NET INCOME */}
+                                  <td
+                                    className={`py-3.5 px-4 text-right font-semibold hidden xl:table-cell ${
+                                      item.netIncome >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                                    }`}
+                                  >
+                                    {formatCurrency(item.netIncome)}
+                                  </td>
+
+                                  {/* DOSSIER LINK */}
+                                  <td className="py-3.5 px-4 text-center">
+                                    <Link
+                                      href={`/companies/${item.companyId}`}
+                                      className="inline-flex items-center justify-center h-7 w-7 rounded-lg bg-slate-800/80 hover:bg-indigo-600 text-slate-400 hover:text-white transition-all shadow-sm"
+                                      title="View venture performance dossier"
                                     >
-                                      <ArrowDownRight className="h-3 w-3" />
-                                      {Math.abs(item.rankMovement)}
-                                    </span>
-                                  ) : (
-                                    <span className="inline-flex items-center text-[10px] text-slate-500" title="Unchanged rank">
-                                      <Minus className="h-3 w-3" />
-                                    </span>
-                                  )
-                                ) : (
-                                  <span className="text-[9px] text-indigo-400/80 font-sans font-semibold">NEW</span>
-                                )}
-                              </div>
-                            </td>
-
-                            {/* COMPANY NAME & DOMAIN */}
-                            <td className="py-3.5 px-4 font-sans">
-                              <Link
-                                href={`/companies/${item.companyId}`}
-                                className="block group-hover:text-emerald-300 transition-colors"
-                              >
-                                <div className="font-bold text-white text-sm flex items-center gap-1.5">
-                                  <span>{item.companyName}</span>
-                                  {item.tableStation && (
-                                    <span className="text-[10px] font-mono text-slate-400 bg-slate-950 px-1 py-0.2 rounded border border-slate-800">
-                                      {item.tableStation}
-                                    </span>
-                                  )}
-                                </div>
-                                <div className="text-[11px] text-slate-400 flex items-center gap-2 mt-0.5">
-                                  <span className="font-mono text-sky-400 font-semibold">{item.teamCode}</span>
-                                  <span>•</span>
-                                  <span className="text-slate-400">{item.domainName}</span>
-                                  {selectedDomain === 'ALL' && (
-                                    <>
-                                      <span>•</span>
-                                      <span className="text-slate-500">Domain #{item.domainRank}</span>
-                                    </>
-                                  )}
-                                </div>
-                              </Link>
-                            </td>
-
-                            {/* VALUATION */}
-                            <td className="py-3.5 px-4 text-right text-indigo-200 font-semibold">
-                              {formatCurrency(item.valuation)}
-                            </td>
-
-                            {/* RETAINED EQUITY */}
-                            <td className="py-3.5 px-4 text-right text-slate-300">
-                              {formatPercent(item.retainedEquityPct)}
-                            </td>
-
-                            {/* FINAL SCORE */}
-                            <td className="py-3.5 px-4 text-right font-extrabold text-amber-400 text-sm">
-                              {formatCurrency(item.finalScore)}
-                            </td>
-
-                            {/* REVENUE */}
-                            <td className="py-3.5 px-4 text-right text-emerald-400 font-semibold hidden md:table-cell">
-                              {formatCurrency(item.grossRevenue)}
-                            </td>
-
-                            {/* ENDING CASH */}
-                            <td className="py-3.5 px-4 text-right text-sky-300 font-semibold hidden lg:table-cell">
-                              {formatCurrency(item.endingCash)}
-                            </td>
-
-                            {/* NET INCOME */}
-                            <td
-                              className={`py-3.5 px-4 text-right font-semibold hidden xl:table-cell ${
-                                item.netIncome >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                              }`}
-                            >
-                              {formatCurrency(item.netIncome)}
-                            </td>
-
-                            {/* DOSSIER LINK */}
-                            <td className="py-3.5 px-4 text-center">
-                              <Link
-                                href={`/companies/${item.companyId}`}
-                                className="inline-flex items-center justify-center h-7 w-7 rounded-lg bg-slate-800/80 hover:bg-indigo-600 text-slate-400 hover:text-white transition-all shadow-sm"
-                                title="View venture performance dossier"
-                              >
-                                <ChevronRight className="h-4 w-4" />
-                              </Link>
-                            </td>
-                          </tr>
-                        );
-                      })
-                    )}
-                  </tbody>
-                </table>
-              </div>
+                                      <ChevronRight className="h-4 w-4" />
+                                    </Link>
+                                  </td>
+                                </tr>
+                              );
+                            })
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
+                );
+              })}
             </div>
 
             {/* SCORING RULES FOOTER NOTE */}
@@ -729,19 +816,19 @@ export default function PublicLeaderboardPage() {
                 <span>Deterministic Scoring Engine & Tie-Break Hierarchy</span>
               </div>
               <p className="leading-relaxed text-slate-500">
-                Rank ordering is computed strictly by: 1) Final Score (Valuation × Retained Equity %), 2) Company Valuation, 3) Gross Revenue, 4) Ending Cash Balance, 5) Alphabetical Team Identifier. A company with lower pre-dilution enterprise value can outrank a higher-valued competitor by preserving founder equity.
+                Each domain operates as an independent competition track. Intra-domain rank ordering is computed strictly by: 1) Final Score (Valuation × Retained Equity %), 2) Company Valuation, 3) Gross Revenue, 4) Ending Cash Balance, 5) Alphabetical Team Identifier. A company with lower pre-dilution enterprise value can outrank a higher-valued competitor within its domain by preserving founder equity.
               </p>
             </div>
           </div>
         )}
       </main>
 
-      {/* 6. GLOBAL FOOTER */}
+      {/* 4. GLOBAL FOOTER */}
       <footer className="border-t border-slate-800/80 py-6 px-4 sm:px-6 lg:px-8 text-center text-xs text-slate-500 space-y-2">
         <div className="flex flex-wrap items-center justify-center gap-3">
           <span>Capital Quest Simulation Platform</span>
           <span>•</span>
-          <span>Phase 5: Financial Dossiers & Public Leaderboard</span>
+          <span>Independent Domain Rankings</span>
           <span>•</span>
           <Link href="/admin/dashboard" className="text-slate-400 hover:text-slate-200 underline">
             Staff Portal
