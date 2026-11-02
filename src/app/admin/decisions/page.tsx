@@ -11,6 +11,8 @@ import {
   RefreshCw,
   Lock,
   Search,
+  TrendingUp,
+  Info,
 } from 'lucide-react';
 import { AdminShell } from '@/components/layout/admin-shell';
 import { Card, CardHeader, CardContent } from '@/components/ui/card';
@@ -35,6 +37,22 @@ interface ExistingDecision {
   adminOverrideNotes?: string;
 }
 
+interface DynamicOfferInfo {
+  name: string;
+  investmentAmount: number;
+  equityStakePct: number;
+}
+
+interface TeamInvestorOfferInfo {
+  id?: string;
+  confidenceTier?: string;
+  offerA: DynamicOfferInfo;
+  offerB: DynamicOfferInfo;
+  selectedChoice: 'none' | 'offer_a' | 'offer_b' | 'reject_both';
+  isConfirmed: boolean;
+  confirmedAt?: string | null;
+}
+
 interface TeamDecisionEntry {
   teamId: string;
   teamCode: string;
@@ -49,6 +67,8 @@ interface TeamDecisionEntry {
   maxAllowedPrice: number;
   baseUnitCogs: number;
   availableCash: number;
+  currentFounderEquityPct?: number;
+  investorOffer?: TeamInvestorOfferInfo | null;
   decision: ExistingDecision | null;
 }
 
@@ -100,6 +120,11 @@ function AdminDecisionsContent() {
   const [investmentDecision, setInvestmentDecision] = React.useState<'none' | 'offer_a' | 'offer_b' | 'reject_both'>('none');
   const [adminNotes, setAdminNotes] = React.useState<string>('');
 
+  // Investor Offer Confirmation Modal State
+  const [confirmModalOpen, setConfirmModalOpen] = React.useState(false);
+  const [pendingOfferChoice, setPendingOfferChoice] = React.useState<'offer_a' | 'offer_b' | 'reject_both' | null>(null);
+  const [isConfirmingOffer, setIsConfirmingOffer] = React.useState(false);
+
   const mktRef = React.useRef<HTMLInputElement>(null);
 
   const fetchRoundData = React.useCallback(async (targetTeamId?: string, targetRoundId?: string) => {
@@ -147,7 +172,10 @@ function AdminDecisionsContent() {
       setProductionUnits(team.decision.productionUnits.toString());
       setUnitPrice(team.decision.unitPrice.toString());
       setOperationsBudget(team.decision.operationsBudget.toString());
-      setInvestmentDecision(team.decision.investmentDecision || 'none');
+      const effectiveInv = team.investorOffer?.isConfirmed && team.investorOffer?.selectedChoice !== 'none'
+        ? team.investorOffer.selectedChoice
+        : (team.decision.investmentDecision || 'none');
+      setInvestmentDecision(effectiveInv);
       setAdminNotes(team.decision.adminOverrideNotes || '');
     } else {
       setMarketingBudget('');
@@ -155,11 +183,52 @@ function AdminDecisionsContent() {
       setProductionUnits('');
       setUnitPrice(team.benchmarkPrice.toString());
       setOperationsBudget('');
-      setInvestmentDecision('none');
+      const effectiveInv = team.investorOffer?.isConfirmed && team.investorOffer?.selectedChoice !== 'none'
+        ? team.investorOffer.selectedChoice
+        : 'none';
+      setInvestmentDecision(effectiveInv);
       setAdminNotes('');
     }
     setErrorMsg(null);
     setSuccessMsg(null);
+  };
+
+
+  const handleConfirmInvestorChoice = async () => {
+    if (!pendingOfferChoice || !selectedTeam || !data?.round) return;
+    setIsConfirmingOffer(true);
+    setErrorMsg(null);
+    try {
+      const res = await fetch(`/api/rounds/${data.round.id}/investor-offers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          teamId: selectedTeam.teamId,
+          choice: pendingOfferChoice,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        throw new Error(json.error?.message || json.message || 'Failed to confirm investor choice');
+      }
+      setInvestmentDecision(pendingOfferChoice);
+      setSuccessMsg(
+        `Successfully confirmed ${
+          pendingOfferChoice === 'reject_both'
+            ? 'rejection of both offers'
+            : pendingOfferChoice === 'offer_a'
+            ? 'Offer A'
+            : 'Offer B'
+        } for ${selectedTeam.companyName}.`
+      );
+      setConfirmModalOpen(false);
+      setPendingOfferChoice(null);
+      await fetchRoundData(selectedTeam.teamId, data.round.id);
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : 'Error confirming investor offer');
+    } finally {
+      setIsConfirmingOffer(false);
+    }
   };
 
   const handleSelectTeam = (team: TeamDecisionEntry) => {
@@ -636,31 +705,298 @@ function AdminDecisionsContent() {
                         <span className="text-[10px] text-slate-500 mt-0.5 block">Logistics and internal efficiency allocation</span>
                       </div>
 
-                      {/* INVESTMENT DECISION */}
-                      <div>
-                        <label className="block text-xs font-mono font-medium text-slate-300 mb-1">
-                          Investment / Equity Option
-                        </label>
-                        <select
-                          value={investmentDecision}
-                          onChange={e => setInvestmentDecision(e.target.value as 'none' | 'offer_a' | 'offer_b' | 'reject_both')}
-                          disabled={isDecisionLocked || isSubmitting || !isInvestmentAllowed}
-                          aria-label="Investment / Equity Option"
-                          className="w-full h-10 px-3 bg-[#080D1A] border border-slate-700 rounded-md text-xs font-mono text-slate-200 disabled:opacity-50"
-                        >
-                          <option value="none">None (Standard Operations)</option>
-                          {isInvestmentAllowed && (
-                            <>
-                              <option value="offer_a">Offer A (Growth Capital Injection)</option>
-                              <option value="offer_b">Offer B (Strategic Equity Partner)</option>
-                              <option value="reject_both">Reject Both Offers</option>
-                            </>
-                          )}
-                        </select>
-                        <span className="text-[10px] text-slate-500 mt-0.5 block">
-                          {isInvestmentAllowed ? 'Investment window open for this round' : 'Investment decisions permitted only in Rounds 2 & 4'}
-                        </span>
-                      </div>
+                      {/* DYNAMIC INVESTOR FUNDING OPPORTUNITY SECTION (Rounds 2 & 4) */}
+                      {isInvestmentAllowed ? (
+                        <div className="col-span-1 md:col-span-2 p-4 bg-[#070C18] border border-indigo-900/40 rounded-xl space-y-4">
+                          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 border-b border-indigo-950 pb-3">
+                            <div className="flex items-center gap-2">
+                              <TrendingUp className="h-4 w-4 text-indigo-400" />
+                              <span className="text-xs font-mono font-bold uppercase tracking-wider text-indigo-300">
+                                Investor Funding Opportunity (Round {data?.round.roundNumber})
+                              </span>
+                            </div>
+                            {selectedTeam?.investorOffer?.isConfirmed ? (
+                              <Badge variant="success" className="text-[11px] gap-1 px-2.5 py-0.5 font-mono">
+                                <Lock className="h-3 w-3" /> Confirmed & Permanently Locked
+                              </Badge>
+                            ) : (
+                              <Badge variant="warning" className="text-[11px] gap-1 px-2.5 py-0.5 font-mono">
+                                Pending Decision Confirmation
+                              </Badge>
+                            )}
+                          </div>
+
+                          {/* Founder equity baseline */}
+                          <div className="text-xs font-mono text-slate-300 flex items-center justify-between bg-slate-900/60 px-3 py-2 rounded-lg border border-slate-800">
+                            <span>Current Retained Founder Equity:</span>
+                            <span className="font-bold text-white">
+                              {(selectedTeam?.currentFounderEquityPct ?? 100).toFixed(1)}%
+                            </span>
+                          </div>
+
+                          {/* Three Side-by-Side Term Sheets */}
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                            {/* OFFER A CARD */}
+                            {(() => {
+                              const offerA = selectedTeam?.investorOffer?.offerA ?? {
+                                name: data?.round.roundNumber === 2 ? 'Seed Conservative Partner' : 'Series A Growth Partner',
+                                investmentAmount: 200000,
+                                equityStakePct: 10.0,
+                              };
+                              const founderBefore = selectedTeam?.currentFounderEquityPct ?? 100;
+                              const founderAfter = founderBefore * (1 - offerA.equityStakePct / 100);
+                              const isSelected = investmentDecision === 'offer_a';
+                              const isConfirmedOffer = selectedTeam?.investorOffer?.isConfirmed && selectedTeam?.investorOffer?.selectedChoice === 'offer_a';
+
+                              return (
+                                <div
+                                  className={`p-3.5 rounded-lg border transition-all flex flex-col justify-between ${
+                                    isConfirmedOffer
+                                      ? 'bg-emerald-950/30 border-emerald-500 shadow-md'
+                                      : isSelected
+                                      ? 'bg-indigo-950/40 border-indigo-400 shadow-md'
+                                      : 'bg-[#0B1120] border-slate-800 hover:border-slate-700'
+                                  }`}
+                                >
+                                  <div>
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-[11px] font-mono font-bold uppercase tracking-wider text-indigo-400">
+                                        Offer A
+                                      </span>
+                                      {isConfirmedOffer && (
+                                        <Badge variant="success" className="text-[9px] px-1 py-0">LOCKED</Badge>
+                                      )}
+                                    </div>
+                                    <div className="text-xs font-semibold text-white mt-1">
+                                      {offerA.name}
+                                    </div>
+                                    <div className="mt-2 text-lg font-bold font-mono text-emerald-400">
+                                      +${offerA.investmentAmount.toLocaleString()}
+                                    </div>
+                                    <div className="text-[11px] font-mono text-amber-300 mt-0.5">
+                                      for {offerA.equityStakePct.toFixed(1)}% Equity Stake
+                                    </div>
+
+                                    {/* Equity Preview */}
+                                    <div className="mt-3 pt-2.5 border-t border-slate-800/80 space-y-1 text-[11px] font-mono">
+                                      <div className="flex justify-between text-slate-400">
+                                        <span>Founder Equity:</span>
+                                        <span className="text-white font-medium">
+                                          {founderBefore.toFixed(1)}% → {founderAfter.toFixed(2)}%
+                                        </span>
+                                      </div>
+                                      <div className="flex justify-between text-slate-400">
+                                        <span>Investor Stake:</span>
+                                        <span className="text-amber-300 font-medium">
+                                          {offerA.equityStakePct.toFixed(2)}%
+                                        </span>
+                                      </div>
+                                      <div className="flex justify-between text-slate-400">
+                                        <span>Cash Inflow:</span>
+                                        <span className="text-emerald-400 font-medium">
+                                          +${offerA.investmentAmount.toLocaleString()}
+                                        </span>
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  <div className="mt-4 pt-2">
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant={isConfirmedOffer ? 'emerald' : isSelected ? 'primary' : 'secondary'}
+                                      disabled={isDecisionLocked || Boolean(selectedTeam?.investorOffer?.isConfirmed) || data?.round.status !== 'open'}
+                                      onClick={() => {
+                                        setPendingOfferChoice('offer_a');
+                                        setConfirmModalOpen(true);
+                                      }}
+                                      className="w-full text-xs font-bold"
+                                    >
+                                      {isConfirmedOffer ? 'Accepted & Locked' : isSelected ? 'Selected (Offer A)' : 'Accept Offer A'}
+                                    </Button>
+                                  </div>
+                                </div>
+                              );
+                            })()}
+
+                            {/* OFFER B CARD */}
+                            {(() => {
+                              const offerB = selectedTeam?.investorOffer?.offerB ?? {
+                                name: data?.round.roundNumber === 2 ? 'Seed Strategic VC' : 'Series A Growth Fund',
+                                investmentAmount: 350000,
+                                equityStakePct: 20.0,
+                              };
+                              const founderBefore = selectedTeam?.currentFounderEquityPct ?? 100;
+                              const founderAfter = founderBefore * (1 - offerB.equityStakePct / 100);
+                              const isSelected = investmentDecision === 'offer_b';
+                              const isConfirmedOffer = selectedTeam?.investorOffer?.isConfirmed && selectedTeam?.investorOffer?.selectedChoice === 'offer_b';
+
+                              return (
+                                <div
+                                  className={`p-3.5 rounded-lg border transition-all flex flex-col justify-between ${
+                                    isConfirmedOffer
+                                      ? 'bg-emerald-950/30 border-emerald-500 shadow-md'
+                                      : isSelected
+                                      ? 'bg-indigo-950/40 border-indigo-400 shadow-md'
+                                      : 'bg-[#0B1120] border-slate-800 hover:border-slate-700'
+                                  }`}
+                                >
+                                  <div>
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-[11px] font-mono font-bold uppercase tracking-wider text-purple-400">
+                                        Offer B
+                                      </span>
+                                      {isConfirmedOffer && (
+                                        <Badge variant="success" className="text-[9px] px-1 py-0">LOCKED</Badge>
+                                      )}
+                                    </div>
+                                    <div className="text-xs font-semibold text-white mt-1">
+                                      {offerB.name}
+                                    </div>
+                                    <div className="mt-2 text-lg font-bold font-mono text-emerald-400">
+                                      +${offerB.investmentAmount.toLocaleString()}
+                                    </div>
+                                    <div className="text-[11px] font-mono text-purple-300 mt-0.5">
+                                      for {offerB.equityStakePct.toFixed(1)}% Equity Stake
+                                    </div>
+
+                                    {/* Equity Preview */}
+                                    <div className="mt-3 pt-2.5 border-t border-slate-800/80 space-y-1 text-[11px] font-mono">
+                                      <div className="flex justify-between text-slate-400">
+                                        <span>Founder Equity:</span>
+                                        <span className="text-white font-medium">
+                                          {founderBefore.toFixed(1)}% → {founderAfter.toFixed(2)}%
+                                        </span>
+                                      </div>
+                                      <div className="flex justify-between text-slate-400">
+                                        <span>Investor Stake:</span>
+                                        <span className="text-purple-300 font-medium">
+                                          {offerB.equityStakePct.toFixed(2)}%
+                                        </span>
+                                      </div>
+                                      <div className="flex justify-between text-slate-400">
+                                        <span>Cash Inflow:</span>
+                                        <span className="text-emerald-400 font-medium">
+                                          +${offerB.investmentAmount.toLocaleString()}
+                                        </span>
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  <div className="mt-4 pt-2">
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant={isConfirmedOffer ? 'emerald' : isSelected ? 'primary' : 'secondary'}
+                                      disabled={isDecisionLocked || Boolean(selectedTeam?.investorOffer?.isConfirmed) || data?.round.status !== 'open'}
+                                      onClick={() => {
+                                        setPendingOfferChoice('offer_b');
+                                        setConfirmModalOpen(true);
+                                      }}
+                                      className="w-full text-xs font-bold"
+                                    >
+                                      {isConfirmedOffer ? 'Accepted & Locked' : isSelected ? 'Selected (Offer B)' : 'Accept Offer B'}
+                                    </Button>
+                                  </div>
+                                </div>
+                              );
+                            })()}
+
+                            {/* REJECT BOTH OFFERS CARD */}
+                            {(() => {
+                              const founderBefore = selectedTeam?.currentFounderEquityPct ?? 100;
+                              const isSelected = investmentDecision === 'reject_both';
+                              const isConfirmedOffer = selectedTeam?.investorOffer?.isConfirmed && selectedTeam?.investorOffer?.selectedChoice === 'reject_both';
+
+                              return (
+                                <div
+                                  className={`p-3.5 rounded-lg border transition-all flex flex-col justify-between ${
+                                    isConfirmedOffer
+                                      ? 'bg-rose-950/30 border-rose-500 shadow-md'
+                                      : isSelected
+                                      ? 'bg-slate-800/60 border-slate-400 shadow-md'
+                                      : 'bg-[#0B1120] border-slate-800 hover:border-slate-700'
+                                  }`}
+                                >
+                                  <div>
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-[11px] font-mono font-bold uppercase tracking-wider text-rose-400">
+                                        Alternative
+                                      </span>
+                                      {isConfirmedOffer && (
+                                        <Badge variant="error" className="text-[9px] px-1 py-0">REJECTED</Badge>
+                                      )}
+                                    </div>
+                                    <div className="text-xs font-semibold text-white mt-1">
+                                      Reject Both Offers
+                                    </div>
+                                    <div className="mt-2 text-lg font-bold font-mono text-slate-300">
+                                      $0.00
+                                    </div>
+                                    <div className="text-[11px] font-mono text-slate-400 mt-0.5">
+                                      0.0% Dilution (Bootstrapping)
+                                    </div>
+
+                                    {/* Equity Preview */}
+                                    <div className="mt-3 pt-2.5 border-t border-slate-800/80 space-y-1 text-[11px] font-mono">
+                                      <div className="flex justify-between text-slate-400">
+                                        <span>Founder Equity:</span>
+                                        <span className="text-white font-medium">
+                                          {founderBefore.toFixed(1)}% (Unchanged)
+                                        </span>
+                                      </div>
+                                      <div className="flex justify-between text-slate-400">
+                                        <span>Investor Stake:</span>
+                                        <span className="text-slate-400 font-medium">0.00%</span>
+                                      </div>
+                                      <div className="flex justify-between text-slate-400">
+                                        <span>Cash Inflow:</span>
+                                        <span className="text-slate-400 font-medium">$0.00</span>
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  <div className="mt-4 pt-2">
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant={isConfirmedOffer ? 'destructive' : isSelected ? 'secondary' : 'outline'}
+                                      disabled={isDecisionLocked || Boolean(selectedTeam?.investorOffer?.isConfirmed) || data?.round.status !== 'open'}
+                                      onClick={() => {
+                                        setPendingOfferChoice('reject_both');
+                                        setConfirmModalOpen(true);
+                                      }}
+                                      className="w-full text-xs font-bold"
+                                    >
+                                      {isConfirmedOffer ? 'Rejected & Locked' : isSelected ? 'Selected (Reject Both)' : 'Reject Both'}
+                                    </Button>
+                                  </div>
+                                </div>
+                              );
+                            })()}
+                          </div>
+
+                          {/* Financing Accounting Disclaimer */}
+                          <div className="p-2.5 bg-slate-950/70 border border-slate-800 rounded-lg text-[10px] font-mono text-slate-400 flex items-start gap-2">
+                            <Info className="h-4 w-4 text-indigo-400 shrink-0 mt-0.5" />
+                            <span>
+                              <strong>Financing Accounting Policy:</strong> Investor funding is classified strictly as financing cash flow. Cash is added directly to company ending liquid treasury upon simulation. Funding is NEVER recognized as sales revenue, gross profit, or operating income.
+                            </span>
+                          </div>
+                        </div>
+                      ) : (
+                        <div>
+                          <label className="block text-xs font-mono font-medium text-slate-300 mb-1">
+                            Investment / Equity Option
+                          </label>
+                          <div className="w-full h-10 px-3 bg-[#080D1A] border border-slate-800 rounded-md text-xs font-mono text-slate-500 flex items-center">
+                            Standard Operations (No investment window in Round {data?.round.roundNumber})
+                          </div>
+                          <span className="text-[10px] text-slate-500 mt-0.5 block">
+                            Fundraising rounds occur exclusively in Round 2 (Seed) and Round 4 (Series A).
+                          </span>
+                        </div>
+                      )}
                     </div>
 
                     {/* ADMIN AUDIT NOTE */}
@@ -743,6 +1079,110 @@ function AdminDecisionsContent() {
           </div>
         </div>
       </div>
+
+      {/* IMMUTABLE CONFIRMATION MODAL */}
+      {confirmModalOpen && pendingOfferChoice && selectedTeam && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div className="bg-[#0C1322] border border-slate-700 rounded-xl max-w-md w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 bg-indigo-950/80 border border-indigo-700/60 rounded-lg text-indigo-400">
+                <Lock className="h-5 w-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">
+                  Confirm Investment Choice
+                </h3>
+                <p className="text-xs text-slate-400 font-mono">
+                  {selectedTeam.companyName} ({selectedTeam.teamCode})
+                </p>
+              </div>
+            </div>
+
+            <div className="p-4 bg-slate-900/80 border border-slate-800 rounded-lg space-y-2 text-xs font-mono">
+              <div className="text-slate-400">Selected Action:</div>
+              <div className="text-sm font-bold text-white uppercase">
+                {pendingOfferChoice === 'offer_a'
+                  ? 'Accept Offer A (Conservative Funding)'
+                  : pendingOfferChoice === 'offer_b'
+                  ? 'Accept Offer B (Growth Capital)'
+                  : 'Reject Both Offers'}
+              </div>
+
+              {pendingOfferChoice === 'offer_a' && selectedTeam.investorOffer?.offerA && (
+                <div className="pt-2 border-t border-slate-800 text-slate-300 space-y-1">
+                  <div>Cash Injection: <span className="text-emerald-400 font-bold">+${selectedTeam.investorOffer.offerA.investmentAmount.toLocaleString()}</span></div>
+                  <div>Equity Dilution: <span className="text-amber-300 font-bold">{selectedTeam.investorOffer.offerA.equityStakePct.toFixed(1)}%</span></div>
+                  <div>
+                    Projected Founder Equity:{' '}
+                    <span className="text-white font-bold">
+                      {((selectedTeam.currentFounderEquityPct ?? 100) * (1 - selectedTeam.investorOffer.offerA.equityStakePct / 100)).toFixed(2)}%
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {pendingOfferChoice === 'offer_b' && selectedTeam.investorOffer?.offerB && (
+                <div className="pt-2 border-t border-slate-800 text-slate-300 space-y-1">
+                  <div>Cash Injection: <span className="text-emerald-400 font-bold">+${selectedTeam.investorOffer.offerB.investmentAmount.toLocaleString()}</span></div>
+                  <div>Equity Dilution: <span className="text-purple-300 font-bold">{selectedTeam.investorOffer.offerB.equityStakePct.toFixed(1)}%</span></div>
+                  <div>
+                    Projected Founder Equity:{' '}
+                    <span className="text-white font-bold">
+                      {((selectedTeam.currentFounderEquityPct ?? 100) * (1 - selectedTeam.investorOffer.offerB.equityStakePct / 100)).toFixed(2)}%
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {pendingOfferChoice === 'reject_both' && (
+                <div className="pt-2 border-t border-slate-800 text-slate-300 space-y-1">
+                  <div>Cash Injection: <span className="text-slate-400 font-bold">$0.00</span></div>
+                  <div>Equity Dilution: <span className="text-slate-400 font-bold">0.00% (No Dilution)</span></div>
+                  <div>
+                    Retained Founder Equity:{' '}
+                    <span className="text-white font-bold">
+                      {(selectedTeam.currentFounderEquityPct ?? 100).toFixed(1)}%
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="p-3 bg-amber-950/30 border border-amber-800/60 rounded-lg text-[11px] text-amber-300 flex items-start gap-2">
+              <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+              <span>
+                <strong>Warning — Immutable Action:</strong> Once confirmed, this investor offer selection is permanently locked. Teams and administrators cannot switch offers or reconsider rejections.
+              </span>
+            </div>
+
+            <div className="flex justify-end gap-3 pt-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={isConfirmingOffer}
+                onClick={() => {
+                  setConfirmModalOpen(false);
+                  setPendingOfferChoice(null);
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                variant="emerald"
+                size="sm"
+                isLoading={isConfirmingOffer}
+                onClick={handleConfirmInvestorChoice}
+                className="font-bold gap-1.5"
+              >
+                <Lock className="h-3.5 w-3.5" />
+                Confirm & Lock Choice
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </AdminShell>
   );
 }

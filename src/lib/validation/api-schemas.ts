@@ -80,6 +80,11 @@ export const UpdatePresentationStateSchema = z.object({
   ceremonyStage: z.enum(['waiting', 'reveal_third', 'reveal_second', 'reveal_first', 'podium']).optional(),
 });
 
+export const ConfirmInvestorOfferSchema = z.object({
+  teamId: z.string().uuid('Invalid teamId UUID format'),
+  choice: z.enum(['offer_a', 'offer_b', 'reject_both']),
+});
+
 export type DecisionSubmitInput = z.infer<typeof DecisionSubmitSchema>;
 export type SimulateRoundInput = z.infer<typeof SimulateRoundSchema>;
 export type VoidRoundInput = z.infer<typeof VoidRoundSchema>;
@@ -90,3 +95,4 @@ export type UpdatePresentationStateInput = z.infer<typeof UpdatePresentationStat
 export type AdminDecisionConfirmInput = z.infer<typeof AdminDecisionConfirmSchema>;
 export type ResetRoundDecisionsInput = z.infer<typeof ResetRoundDecisionsSchema>;
 export type ResetEntireTournamentInput = z.infer<typeof ResetEntireTournamentSchema>;
+export type ConfirmInvestorOfferInput = z.infer<typeof ConfirmInvestorOfferSchema>;

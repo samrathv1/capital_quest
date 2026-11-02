@@ -5,6 +5,15 @@ import { DecisionSubmitInput, VoidRoundInput, AdminDecisionConfirmInput } from '
 import { D } from '@/engine/math/precision';
 import { isActiveDomain, normalizeDomainCode } from '@/engine/config/domain-archetypes';
 import { assertOrganizerPoliciesApproved, syncOrganizerPolicyApprovals, resetOrganizerPolicyGates } from './organizer-approvals';
+import {
+  computeInvestorConfidenceScore,
+  buildTierOffers,
+  FinalizedRoundData,
+  InvestorConfidenceTier,
+  DynamicInvestorOffer,
+  InvestorConfidenceBreakdown,
+} from '@/engine/investor';
+import { TeamInvestorOfferRecord } from '@/types/database';
 
 interface PresentationEventRecord {
   id: string;
@@ -752,6 +761,20 @@ export class TournamentService {
       throw new AppError('DATABASE_ERROR', 'RPC fn_reset_round_decisions executed but returned no result.', 500);
     }
 
+    try {
+      await this.supabase
+        .from('team_investor_offers')
+        .update({
+          selected_choice: 'none',
+          is_confirmed: false,
+          confirmed_at: null,
+          confirmed_by: null,
+        })
+        .eq('round_id', roundId);
+    } catch {
+      // Mock fallback
+    }
+
     return rpcData;
   }
 
@@ -949,6 +972,15 @@ export class TournamentService {
     // 3. Invalidate in-memory organizer policy gates upon confirmed atomic database reset
     resetOrganizerPolicyGates(eventId);
 
+    try {
+      await this.supabase
+        .from('team_investor_offers')
+        .delete()
+        .eq('event_id', eventId);
+    } catch {
+      // Mock fallback
+    }
+
     return {
       ...rpcData,
       backup_id: backupId,
@@ -1008,6 +1040,36 @@ export class TournamentService {
       );
     }
 
+    // 3. Enforce immutability if investor choice has already been confirmed
+    let effectiveInvestmentDecision = input.investmentDecision;
+    if (round.round_number === 2 || round.round_number === 4) {
+      try {
+        const { data: offerRecord } = await this.supabase
+          .from('team_investor_offers')
+          .select('selected_choice, is_confirmed')
+          .eq('round_id', input.roundId)
+          .eq('team_id', input.teamId)
+          .maybeSingle();
+
+        if (offerRecord?.is_confirmed) {
+          if (
+            input.investmentDecision &&
+            input.investmentDecision !== 'none' &&
+            input.investmentDecision !== offerRecord.selected_choice
+          ) {
+            throw new AppError(
+              'DECISION_LOCKED',
+              `Investor offer choice is already confirmed and permanently locked for this team (${offerRecord.selected_choice}). Modification is not permitted.`,
+              409
+            );
+          }
+          effectiveInvestmentDecision = offerRecord.selected_choice as 'none' | 'offer_a' | 'offer_b' | 'reject_both';
+        }
+      } catch (err: unknown) {
+        if (err instanceof AppError) throw err;
+      }
+    }
+
     // Upsert decision
     const { data: decision, error } = await this.supabase
       .from('decisions')
@@ -1021,7 +1083,7 @@ export class TournamentService {
           production_units: input.productionUnits,
           unit_price: input.unitPrice,
           operations_budget: input.operationsBudget,
-          investment_decision: input.investmentDecision,
+          investment_decision: effectiveInvestmentDecision,
           entered_by: operatorId,
           entered_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
@@ -1122,7 +1184,7 @@ export class TournamentService {
     // Normalize input parameter variants
     const unitPrice = input.unitPrice ?? input.unitSellingPrice ?? 0;
     const rawInv = (input.investmentDecision ?? input.investmentChoice ?? 'none').toLowerCase();
-    const investmentDecision = (
+    let investmentDecision = (
       rawInv === 'offer_a' || rawInv === 'offer_b' || rawInv === 'reject_both' ? rawInv : 'none'
     ) as 'none' | 'offer_a' | 'offer_b' | 'reject_both';
     const adminNotes = input.adminNotes ?? input.auditNotes ?? 'Single-Admin validated & confirmed';
@@ -1205,6 +1267,35 @@ export class TournamentService {
       throw new AppError('DECISION_LOCKED', 'Decision is already locked and cannot be modified.', 422);
     }
 
+    // 7b. Check if investment choice is confirmed and locked in team_investor_offers
+    if (round.round_number === 2 || round.round_number === 4) {
+      try {
+        const { data: offerRecord } = await this.supabase
+          .from('team_investor_offers')
+          .select('selected_choice, is_confirmed')
+          .eq('round_id', input.roundId)
+          .eq('team_id', input.teamId)
+          .maybeSingle();
+
+        if (offerRecord?.is_confirmed) {
+          if (
+            input.investmentDecision &&
+            input.investmentDecision !== 'none' &&
+            input.investmentDecision !== offerRecord.selected_choice
+          ) {
+            throw new AppError(
+              'DECISION_LOCKED',
+              `Investor offer choice is already confirmed and permanently locked for this team (${offerRecord.selected_choice}). Modification is not permitted.`,
+              409
+            );
+          }
+          investmentDecision = offerRecord.selected_choice as 'none' | 'offer_a' | 'offer_b' | 'reject_both';
+        }
+      } catch (err: unknown) {
+        if (err instanceof AppError) throw err;
+      }
+    }
+
     // 8. Upsert decision in verified status
     const nowIso = new Date().toISOString();
     const { data: decision, error: upsertErr } = await this.supabase
@@ -1262,6 +1353,375 @@ export class TournamentService {
     return decision;
   }
 
+
+  /**
+   * Retrieves or computes individualized Dynamic Investor Offers for a team in Round 2 or Round 4.
+   * Investor confidence score and breakdown are confidential and redacted unless caller is super_admin.
+   */
+  async getOrGenerateTeamInvestorOffers(
+    roundId: string,
+    teamId: string,
+    callerRole?: string
+  ): Promise<{
+    id?: string;
+    roundId: string;
+    teamId: string;
+    roundNumber: number;
+    offerA: DynamicInvestorOffer;
+    offerB: DynamicInvestorOffer;
+    selectedChoice: 'none' | 'offer_a' | 'offer_b' | 'reject_both';
+    isConfirmed: boolean;
+    confirmedAt?: string | null;
+    currentFounderEquityPct: number;
+    confidenceScore?: number;
+    confidenceTier?: InvestorConfidenceTier;
+    scoringBreakdown?: InvestorConfidenceBreakdown | Record<string, unknown>;
+  }> {
+    const round = await this.getRoundById(roundId);
+    if (round.round_number !== 2 && round.round_number !== 4) {
+      throw new AppError(
+        'VALIDATION_ERROR',
+        `Dynamic investor funding is only available in Round 2 (Seed) and Round 4 (Series A). Current round: ${round.round_number}`,
+        400
+      );
+    }
+
+    // 1. Get current founder equity from previous round snapshot (or default 100%)
+    let currentFounderEquityPct = 100;
+    try {
+      const { data: prevRound } = await this.supabase
+        .from('rounds')
+        .select('id')
+        .eq('event_id', round.event_id)
+        .eq('round_number', round.round_number - 1)
+        .maybeSingle();
+
+      if (prevRound) {
+        const { data: snap } = await this.supabase
+          .from('company_snapshots')
+          .select('retained_equity_pct')
+          .eq('round_id', prevRound.id)
+          .eq('team_id', teamId)
+          .eq('is_active', true)
+          .maybeSingle();
+
+        if (snap?.retained_equity_pct != null) {
+          currentFounderEquityPct = Number(snap.retained_equity_pct);
+        }
+      }
+    } catch {
+      // Mock fallback
+    }
+
+    // 2. Check if offer already persisted in team_investor_offers
+    let existingOffer: TeamInvestorOfferRecord | null = null;
+    try {
+      const { data } = await this.supabase
+        .from('team_investor_offers')
+        .select('*')
+        .eq('round_id', roundId)
+        .eq('team_id', teamId)
+        .maybeSingle();
+      existingOffer = data as TeamInvestorOfferRecord | null;
+    } catch {
+      // Mock fallback
+    }
+
+    if (existingOffer) {
+      const tierOffers = buildTierOffers(existingOffer.round_number, existingOffer.confidence_tier as InvestorConfidenceTier);
+      const offerA = tierOffers.offerA;
+      const offerB = tierOffers.offerB;
+
+      const resultPayload: {
+        id?: string;
+        roundId: string;
+        teamId: string;
+        roundNumber: number;
+        offerA: DynamicInvestorOffer;
+        offerB: DynamicInvestorOffer;
+        selectedChoice: 'none' | 'offer_a' | 'offer_b' | 'reject_both';
+        isConfirmed: boolean;
+        confirmedAt?: string | null;
+        currentFounderEquityPct: number;
+        confidenceScore?: number;
+        confidenceTier?: InvestorConfidenceTier;
+        scoringBreakdown?: InvestorConfidenceBreakdown | Record<string, unknown>;
+      } = {
+        id: existingOffer.id,
+        roundId: existingOffer.round_id,
+        teamId: existingOffer.team_id,
+        roundNumber: existingOffer.round_number,
+        offerA,
+        offerB,
+        selectedChoice: existingOffer.selected_choice,
+        isConfirmed: existingOffer.is_confirmed,
+        confirmedAt: existingOffer.confirmed_at,
+        currentFounderEquityPct,
+      };
+
+      if (callerRole === 'super_admin') {
+        resultPayload.confidenceScore = existingOffer.confidence_score;
+        resultPayload.confidenceTier = existingOffer.confidence_tier;
+        resultPayload.scoringBreakdown = existingOffer.scoring_breakdown;
+      }
+
+      return resultPayload;
+    }
+
+    // 3. Generate offers dynamically from finalized prior rounds
+    const finalizedHistory: FinalizedRoundData[] = [];
+    try {
+      const { data: priorRounds } = await this.supabase
+        .from('rounds')
+        .select('id, round_number')
+        .eq('event_id', round.event_id)
+        .lt('round_number', round.round_number)
+        .order('round_number', { ascending: true });
+
+      if (priorRounds && priorRounds.length > 0) {
+        const priorRoundIds = priorRounds.map((r: { id: string }) => r.id);
+        const { data: priorSnaps } = await this.supabase
+          .from('company_snapshots')
+          .select('*')
+          .in('round_id', priorRoundIds)
+          .eq('team_id', teamId)
+          .eq('is_active', true);
+
+        const snapMap = new Map((priorSnaps || []).map((s: Record<string, unknown>) => [s.round_id as string, s]));
+        for (const pr of priorRounds) {
+          const snap = snapMap.get(pr.id);
+          if (snap) {
+            finalizedHistory.push({
+              roundNumber: pr.round_number,
+              snapshot: snap,
+              grossRevenue: Number(snap.gross_revenue ?? 0),
+              netIncome: Number(snap.net_income ?? 0),
+              grossProfit: Number(snap.gross_profit ?? 0),
+              ebitda: Number(snap.ebitda ?? 0),
+              operatingExpenses: Number(snap.operating_expenses ?? 0),
+              unitsSold: Number(snap.units_sold ?? 0),
+              unitsStockout: Number(snap.units_stockout ?? 0),
+              unitsAvailable: Number(snap.units_available ?? 0),
+              endingInventory: Number(snap.ending_inventory ?? 0),
+            });
+          }
+        }
+      }
+    } catch {
+      // Mock fallback
+    }
+
+    const calculated = computeInvestorConfidenceScore({
+      teamId,
+      targetRoundNumber: round.round_number,
+      history: finalizedHistory,
+    });
+
+    // 4. Persist to team_investor_offers
+    let insertedId: string | undefined;
+    try {
+      const rowToInsert = {
+        event_id: round.event_id,
+        round_id: round.id,
+        team_id: teamId,
+        round_number: round.round_number,
+        confidence_score: calculated.confidenceScore,
+        confidence_tier: calculated.tier,
+        scoring_breakdown: calculated.breakdown,
+        offer_a_amount: calculated.offerA.fundingAmount.toNumber(),
+        offer_a_equity_pct: calculated.offerA.equityStakePct.toNumber(),
+        offer_b_amount: calculated.offerB.fundingAmount.toNumber(),
+        offer_b_equity_pct: calculated.offerB.equityStakePct.toNumber(),
+        selected_choice: 'none',
+        is_confirmed: false,
+      };
+
+      const { data: ins, error: insErr } = await this.supabase
+        .from('team_investor_offers')
+        .upsert(rowToInsert, { onConflict: 'round_id,team_id' })
+        .select('id')
+        .maybeSingle();
+
+      if (!insErr && ins) {
+        insertedId = ins.id;
+      }
+    } catch {
+      // Mock fallback
+    }
+
+    const resultPayload: {
+      id?: string;
+      roundId: string;
+      teamId: string;
+      roundNumber: number;
+      offerA: DynamicInvestorOffer;
+      offerB: DynamicInvestorOffer;
+      selectedChoice: 'none' | 'offer_a' | 'offer_b' | 'reject_both';
+      isConfirmed: boolean;
+      confirmedAt?: string | null;
+      currentFounderEquityPct: number;
+      confidenceScore?: number;
+      confidenceTier?: InvestorConfidenceTier;
+      scoringBreakdown?: InvestorConfidenceBreakdown | Record<string, unknown>;
+    } = {
+      id: insertedId,
+      roundId: round.id,
+      teamId,
+      roundNumber: round.round_number,
+      offerA: calculated.offerA,
+      offerB: calculated.offerB,
+      selectedChoice: 'none',
+      isConfirmed: false,
+      confirmedAt: null,
+      currentFounderEquityPct,
+    };
+
+    if (callerRole === 'super_admin') {
+      resultPayload.confidenceScore = calculated.confidenceScore;
+      resultPayload.confidenceTier = calculated.tier;
+      resultPayload.scoringBreakdown = calculated.breakdown;
+    }
+
+    return resultPayload;
+  }
+
+  /**
+   * Confirms and locks an investment choice (Offer A, Offer B, or Reject Both) for a team.
+   * Enforces immutability: once confirmed, the choice cannot be modified.
+   */
+  async confirmTeamInvestmentChoice(params: {
+    roundId: string;
+    teamId: string;
+    choice: 'offer_a' | 'offer_b' | 'reject_both';
+    adminId: string;
+  }): Promise<{
+    success: boolean;
+    teamId: string;
+    roundId: string;
+    selectedChoice: 'offer_a' | 'offer_b' | 'reject_both';
+    isConfirmed: boolean;
+    confirmedAt: string;
+  }> {
+    const { roundId, teamId, choice, adminId } = params;
+
+    if (!['offer_a', 'offer_b', 'reject_both'].includes(choice)) {
+      throw new AppError(
+        'VALIDATION_ERROR',
+        `Invalid investment choice '${choice}'. Allowed options: 'offer_a', 'offer_b', 'reject_both'.`,
+        400
+      );
+    }
+
+    const round = await this.getRoundById(roundId);
+    if (round.round_number !== 2 && round.round_number !== 4) {
+      throw new AppError(
+        'VALIDATION_ERROR',
+        `Investment offers are only available in Rounds 2 and 4. Attempted on Round ${round.round_number}.`,
+        400
+      );
+    }
+
+    if (round.status !== 'open') {
+      throw new AppError(
+        'VALIDATION_ERROR',
+        `Investment choice confirmation is only permitted when round is open. Current status: ${round.status}.`,
+        400
+      );
+    }
+
+    // Ensure offers exist or generate them
+    const existing = await this.getOrGenerateTeamInvestorOffers(roundId, teamId, 'super_admin');
+
+    if (existing.isConfirmed) {
+      throw new AppError(
+        'DECISION_LOCKED',
+        `Investor offer choice is already confirmed and permanently locked for this team (${existing.selectedChoice}). Modification is not permitted.`,
+        409
+      );
+    }
+
+    const nowIso = new Date().toISOString();
+
+    // 1. Update team_investor_offers
+    try {
+      const { error: updateErr } = await this.supabase
+        .from('team_investor_offers')
+        .update({
+          selected_choice: choice,
+          is_confirmed: true,
+          confirmed_at: nowIso,
+          confirmed_by: adminId,
+          updated_at: nowIso,
+        })
+        .eq('round_id', roundId)
+        .eq('team_id', teamId);
+
+      if (updateErr) {
+        throw new AppError('DATABASE_ERROR', `Failed to lock investment offer: ${updateErr.message}`, 500);
+      }
+    } catch (err: unknown) {
+      if (err instanceof AppError) throw err;
+      // Mock fallback
+    }
+
+    // 2. Synchronize with decisions table
+    try {
+      const { data: decision } = await this.supabase
+        .from('decisions')
+        .select('*')
+        .eq('round_id', roundId)
+        .eq('team_id', teamId)
+        .maybeSingle();
+
+      if (decision) {
+        await this.supabase
+          .from('decisions')
+          .update({
+            investment_decision: choice,
+            updated_at: nowIso,
+          })
+          .eq('id', decision.id);
+      } else {
+        await this.supabase
+          .from('decisions')
+          .insert({
+            round_id: roundId,
+            team_id: teamId,
+            status: 'missing',
+            marketing_budget: 0,
+            rd_budget: 0,
+            production_units: 0,
+            unit_price: 0,
+            operations_budget: 0,
+            investment_decision: choice,
+            entered_by: adminId,
+            entered_at: nowIso,
+          });
+      }
+    } catch {
+      // Mock fallback
+    }
+
+    // 3. Write audit log
+    await this.logAuditEvent({
+      actorId: adminId,
+      action: 'CONFIRM_INVESTMENT_OFFER',
+      entityName: 'team_investor_offers',
+      entityId: `${roundId}:${teamId}`,
+      beforeState: { selected_choice: existing.selectedChoice, is_confirmed: false },
+      afterState: { selected_choice: choice, is_confirmed: true, confirmed_at: nowIso },
+    });
+
+    return {
+      success: true,
+      teamId,
+      roundId,
+      selectedChoice: choice,
+      isConfirmed: true,
+      confirmedAt: nowIso,
+    };
+  }
+
   async confirmAdminDecision(input: AdminDecisionInputFlexible, adminId: string) {
     return this.adminConfirmDecision(input, adminId);
   }
@@ -1311,6 +1771,7 @@ export class TournamentService {
 
     // 3. Fetch previous round snapshots for starting cash (if round > 1)
     const cashMap = new Map<string, number>();
+    const equityMap = new Map<string, number>();
     const roundEventData = round as { events?: { starting_capital?: number } };
     const defaultCash = Number(roundEventData.events?.starting_capital ?? 1000000);
 
@@ -1325,13 +1786,62 @@ export class TournamentService {
       if (prevRound) {
         const { data: snapshots } = await this.supabase
           .from('company_snapshots')
-          .select('team_id, ending_cash')
+          .select('team_id, ending_cash, retained_equity_pct')
           .eq('round_id', prevRound.id)
           .eq('is_active', true);
 
         for (const s of snapshots || []) {
           cashMap.set(s.team_id, Number(s.ending_cash));
+          if (s.retained_equity_pct != null) {
+            equityMap.set(s.team_id, Number(s.retained_equity_pct));
+          }
         }
+      }
+    }
+
+    // 3b. Load or generate investor offers for Round 2 and Round 4
+    const offerMap = new Map<string, Record<string, unknown>>();
+    if (round.round_number === 2 || round.round_number === 4) {
+      try {
+        const { data: offers } = await this.supabase
+          .from('team_investor_offers')
+          .select('*')
+          .eq('round_id', roundId);
+
+        if (offers && offers.length > 0) {
+          for (const o of offers) {
+            offerMap.set(o.team_id, o);
+          }
+        }
+
+        // For teams without an offer row, compute on demand
+        for (const t of teams || []) {
+          if (!offerMap.has(t.id)) {
+            try {
+              const generated = await this.getOrGenerateTeamInvestorOffers(roundId, t.id, 'super_admin');
+              offerMap.set(t.id, {
+                id: generated.id,
+                team_id: t.id,
+                round_id: roundId,
+                round_number: round.round_number,
+                confidence_score: generated.confidenceScore,
+                confidence_tier: generated.confidenceTier,
+                scoring_breakdown: generated.scoringBreakdown,
+                offer_a_amount: generated.offerA.fundingAmount.toNumber(),
+                offer_a_equity_pct: generated.offerA.equityStakePct.toNumber(),
+                offer_b_amount: generated.offerB.fundingAmount.toNumber(),
+                offer_b_equity_pct: generated.offerB.equityStakePct.toNumber(),
+                selected_choice: generated.selectedChoice,
+                is_confirmed: generated.isConfirmed,
+                confirmed_at: generated.confirmedAt,
+              });
+            } catch {
+              // Ignore if prior round not finished yet
+            }
+          }
+        }
+      } catch {
+        // Mock fallback
       }
     }
 
@@ -1373,6 +1883,28 @@ export class TournamentService {
         maxAllowedPrice: Number(domain?.max_allowed_price ?? 2000),
         baseUnitCogs: Number(domain?.base_unit_cogs ?? 100),
         availableCash,
+        currentFounderEquityPct: equityMap.get(t.id) ?? 100,
+        investorOffer: (() => {
+          const rawOffer = offerMap.get(t.id);
+          if (!rawOffer) return null;
+          return {
+            id: rawOffer.id as string | undefined,
+            confidenceTier: rawOffer.confidence_tier as string | undefined,
+            offerA: {
+              name: round.round_number === 2 ? 'Seed Capital (Conservative)' : 'Series A Growth (Conservative)',
+              investmentAmount: Number(rawOffer.offer_a_amount),
+              equityStakePct: Number(rawOffer.offer_a_equity_pct),
+            },
+            offerB: {
+              name: round.round_number === 2 ? 'Seed Capital (Aggressive)' : 'Series A Growth (Aggressive)',
+              investmentAmount: Number(rawOffer.offer_b_amount),
+              equityStakePct: Number(rawOffer.offer_b_equity_pct),
+            },
+            selectedChoice: rawOffer.selected_choice as 'none' | 'offer_a' | 'offer_b' | 'reject_both',
+            isConfirmed: Boolean(rawOffer.is_confirmed),
+            confirmedAt: rawOffer.confirmed_at as string | null | undefined,
+          };
+        })(),
         decision: d ? {
           id: d.id,
           status: d.status,

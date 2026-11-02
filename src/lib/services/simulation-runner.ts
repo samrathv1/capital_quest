@@ -12,6 +12,7 @@ import {
   TournamentSimulationResult,
 } from '@/engine/types';
 import { DOMAIN_ARCHETYPES, getDomainConfig, isActiveDomain } from '@/engine/config/domain-archetypes';
+import { DynamicInvestmentOfferProvider } from '@/engine/config/investment-offers';
 import { D, ZERO } from '@/engine/math/precision';
 import { AppError } from '@/lib/errors/app-error';
 import { assertOrganizerPoliciesApproved, syncOrganizerPolicyApprovals } from './organizer-approvals';
@@ -608,12 +609,51 @@ export async function executeSimulationRound(
     }
   }
 
+  // 6b. Set up dynamic investor offer provider for Round 2 & Round 4
+  let offerProvider: DynamicInvestmentOfferProvider | undefined;
+  if (round.round_number === 2 || round.round_number === 4) {
+    offerProvider = new DynamicInvestmentOfferProvider();
+    try {
+      const { data: offers } = await supabaseClient
+        .from('team_investor_offers')
+        .select('*')
+        .eq('round_id', roundId);
+
+      if (offers && offers.length > 0) {
+        for (const row of offers) {
+          const offerA = {
+            roundNumber: round.round_number,
+            offerType: 'OFFER_A' as const,
+            name: round.round_number === 2 ? 'Seed Capital (Conservative)' : 'Series A Growth (Conservative)',
+            equityStakePct: D(row.offer_a_equity_pct),
+            cashInjection: D(row.offer_a_amount),
+            impliedPostMoneyValuation: D(row.offer_a_amount).div(D(row.offer_a_equity_pct).div(100)),
+            impliedPreMoneyValuation: D(row.offer_a_amount).div(D(row.offer_a_equity_pct).div(100)).sub(D(row.offer_a_amount)),
+          };
+          const offerB = {
+            roundNumber: round.round_number,
+            offerType: 'OFFER_B' as const,
+            name: round.round_number === 2 ? 'Seed Capital (Aggressive)' : 'Series A Growth (Aggressive)',
+            equityStakePct: D(row.offer_b_equity_pct),
+            cashInjection: D(row.offer_b_amount),
+            impliedPostMoneyValuation: D(row.offer_b_amount).div(D(row.offer_b_equity_pct).div(100)),
+            impliedPreMoneyValuation: D(row.offer_b_amount).div(D(row.offer_b_equity_pct).div(100)).sub(D(row.offer_b_amount)),
+          };
+          offerProvider.registerTeamOffers(row.team_id, offerA, offerB);
+        }
+      }
+    } catch {
+      // Mock fallback
+    }
+  }
+
   const simulationResult = simulateTournamentRound({
     roundNumber: round.round_number,
     teamDomainMap,
     decisions: engineDecisions,
     snapshots: engineSnapshots,
     domainConfigs,
+    options: offerProvider ? { offerProvider } : undefined,
   });
 
   // 8. Serialize Results for Database Persistence

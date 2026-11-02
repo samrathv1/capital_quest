@@ -22,5 +22,6 @@ export * from './equity/cap-table';
 export * from './valuation/valuation-policy';
 export * from './valuation/company-valuation';
 export * from './scoring/final-score';
+export * from './investor';
 export * from './simulation/domain-simulation';
 export * from './simulation/tournament-simulation';

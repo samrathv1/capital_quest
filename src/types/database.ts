@@ -148,6 +148,27 @@ export interface DecisionRecord {
   updated_at: string;
 }
 
+export interface TeamInvestorOfferRecord {
+  id: string;
+  event_id: string;
+  round_id: string;
+  team_id: string;
+  round_number: number;
+  confidence_score: number;
+  confidence_tier: 'low' | 'moderate' | 'high';
+  scoring_breakdown: Record<string, unknown>;
+  offer_a_amount: number;
+  offer_a_equity_pct: number;
+  offer_b_amount: number;
+  offer_b_equity_pct: number;
+  selected_choice: 'none' | 'offer_a' | 'offer_b' | 'reject_both';
+  is_confirmed: boolean;
+  confirmed_at?: string | null;
+  confirmed_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface FinancialLedgerRecord {
   id: string;
   event_id: string;

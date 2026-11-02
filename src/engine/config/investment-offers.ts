@@ -102,3 +102,76 @@ export class PerformanceTieredInvestmentOfferProvider implements InvestmentOffer
     return base;
   }
 }
+
+/**
+ * Dynamic Investment Offer Provider (Requirement 2):
+ * Returns individualized, performance-driven investment offers based on the team's
+ * finalized completed rounds and Investor Confidence Score.
+ */
+export class DynamicInvestmentOfferProvider implements InvestmentOfferProvider {
+  private readonly teamOffersMap: Map<string, { OFFER_A: InvestmentOffer; OFFER_B: InvestmentOffer }>;
+
+  constructor(
+    customOffers?: Map<string, { OFFER_A: InvestmentOffer; OFFER_B: InvestmentOffer }>
+  ) {
+    this.teamOffersMap = customOffers ? new Map(customOffers) : new Map();
+  }
+
+  /**
+   * Registers a frozen offer pair for a specific team.
+   */
+  registerTeamOffers(
+    teamId: string,
+    offerA: InvestmentOffer,
+    offerB: InvestmentOffer
+  ): void {
+    this.teamOffersMap.set(teamId, { OFFER_A: offerA, OFFER_B: offerB });
+  }
+
+  getOffer(
+    roundNumber: number,
+    offerType: 'OFFER_A' | 'OFFER_B',
+    companySnapshot?: CompanySnapshot
+  ): InvestmentOffer | null {
+    if (roundNumber !== 2 && roundNumber !== 4) return null;
+
+    if (companySnapshot) {
+      // 1. Check if frozen offers exist for this team
+      const existing = this.teamOffersMap.get(companySnapshot.teamId);
+      if (existing) {
+        return existing[offerType] || null;
+      }
+    }
+
+    // 2. Default fallback: Moderate confidence tier
+    // Round 2 / 4 Moderate: Offer A ($200k / 10%), Offer B ($350k / 20%)
+    if (offerType === 'OFFER_A') {
+      const cash = D(200000);
+      const equity = D(10.0);
+      const postMoney = cash.dividedBy(equity.dividedBy(100));
+      return {
+        roundNumber,
+        offerType: 'OFFER_A',
+        name: 'Strategic Synergy Angels (Conservative Term Sheet)',
+        cashInjection: cash,
+        equityStakePct: equity,
+        impliedPostMoneyValuation: postMoney,
+        impliedPreMoneyValuation: postMoney.minus(cash),
+      };
+    } else {
+      const cash = D(350000);
+      const equity = D(20.0);
+      const postMoney = cash.dividedBy(equity.dividedBy(100));
+      return {
+        roundNumber,
+        offerType: 'OFFER_B',
+        name: 'Apex Venture Partners (Expansion Term Sheet)',
+        cashInjection: cash,
+        equityStakePct: equity,
+        impliedPostMoneyValuation: postMoney,
+        impliedPreMoneyValuation: postMoney.minus(cash),
+      };
+    }
+  }
+}
+
