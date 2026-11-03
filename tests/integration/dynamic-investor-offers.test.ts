@@ -172,7 +172,12 @@ describe('Requirement 2: Dynamic Investor Funding & Equity System Integration', 
             maybeSingle: vi.fn().mockImplementation(() => Promise.resolve({ data: persistedOffer, error: null })),
             update: vi.fn().mockImplementation((vals: any) => {
               persistedOffer = { ...persistedOffer, ...vals };
-              return { eq: vi.fn().mockReturnThis() };
+              const query: any = {
+                eq: vi.fn().mockReturnThis(),
+                select: vi.fn().mockResolvedValue({ data: [{ id: persistedOffer.id }], error: null }),
+                then: (resolve: any) => Promise.resolve({ data: [{ id: persistedOffer.id }], error: null }).then(resolve),
+              };
+              return query;
             }),
           };
         }

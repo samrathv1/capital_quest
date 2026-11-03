@@ -1642,9 +1642,9 @@ export class TournamentService {
 
     const nowIso = new Date().toISOString();
 
-    // 1. Update team_investor_offers
+    // 1. Update team_investor_offers atomically with is_confirmed = false guard
     try {
-      const { error: updateErr } = await this.supabase
+      const { data: updatedRows, error: updateErr } = await this.supabase
         .from('team_investor_offers')
         .update({
           selected_choice: choice,
@@ -1654,10 +1654,20 @@ export class TournamentService {
           updated_at: nowIso,
         })
         .eq('round_id', roundId)
-        .eq('team_id', teamId);
+        .eq('team_id', teamId)
+        .eq('is_confirmed', false)
+        .select('id');
 
       if (updateErr) {
         throw new AppError('DATABASE_ERROR', `Failed to lock investment offer: ${updateErr.message}`, 500);
+      }
+
+      if (Array.isArray(updatedRows) && updatedRows.length === 0) {
+        throw new AppError(
+          'DECISION_LOCKED',
+          `Investor offer choice is already confirmed and permanently locked for this team. Modification is not permitted.`,
+          409
+        );
       }
     } catch (err: unknown) {
       if (err instanceof AppError) throw err;
