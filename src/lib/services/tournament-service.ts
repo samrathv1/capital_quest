@@ -13,7 +13,7 @@ import {
   DynamicInvestorOffer,
   InvestorConfidenceBreakdown,
 } from '@/engine/investor';
-import { TeamInvestorOfferRecord } from '@/types/database';
+import { TeamInvestorOfferRecord, CompanySnapshotRecord, DecisionRecord, InvestmentChoice } from '@/types/database';
 
 interface PresentationEventRecord {
   id: string;
@@ -88,6 +88,274 @@ export type AdminDecisionInputFlexible = Omit<AdminDecisionConfirmInput, 'unitPr
   investmentChoice?: string;
   auditNotes?: string;
 };
+
+export interface TeamIntelligenceInsight {
+  id: string;
+  type: 'warning' | 'opportunity' | 'success' | 'info';
+  category: 'stockout' | 'inventory_burden' | 'cash_runway' | 'margin_health' | 'market_share' | 'rank_momentum' | 'investor_action';
+  title: string;
+  message: string;
+}
+
+export interface TeamIntelligenceRow {
+  // Group A: Team Identity
+  teamId: string;
+  companyId: string;
+  teamCode: string;
+  companyName: string;
+  domainId: string;
+  domainCode: 'D2C' | 'HEALTH' | 'SAAS' | string;
+  domainName: string;
+  tableStation: string | null;
+  status: 'active' | 'disqualified';
+  decisionStatus: 'draft' | 'submitted' | 'confirmed' | 'missing';
+
+  // Group B: Operating Inputs
+  marketingSpend: number;
+  rdSpend: number;
+  productionUnits: number;
+  unitSellingPrice: number;
+  operationsBudget: number;
+  investmentDecision: 'none' | 'offer_a' | 'offer_b' | 'reject_both';
+
+  // Group C: Production & Distribution Analysis
+  productionCost: number;
+  unitsAvailable: number | null;
+  unitsSold: number | null;
+  endingInventory: number | null;
+  unitsStockout: number | null;
+  marketSharePct: number | null;
+  potentialDemand: number | null;
+  productQualityIndex: number | null;
+  brandEquityScore: number | null;
+
+  // Group D: Financial Performance Outputs
+  grossRevenue: number | null;
+  cogs: number | null;
+  grossProfit: number | null;
+  operatingExpenses: number | null;
+  inventoryHoldingCost: number | null;
+  ebitda: number | null;
+  taxExpense: number | null;
+  netIncome: number | null;
+  operatingCashFlow: number | null;
+  financingCashFlow: number | null;
+  endingCash: number | null;
+  enterpriseValue: number | null;
+  companyValuation: number | null;
+
+  // Group E: Ownership & Dynamic Rankings
+  retainedEquityPct: number | null;
+  equityAdjustedScore: number | null;
+  domainRank: number | null;
+  previousDomainRank: number | null;
+  rankDelta: number | null;
+
+  // Group F: Automated Insights & Rule-Based Observations
+  insights: TeamIntelligenceInsight[];
+
+  // Group G: Centralized Investment Tracking (Rounds 2 & 4)
+  hasInvestorOffers: boolean;
+  offerAAmount: number | null;
+  offerAEquityPct: number | null;
+  offerBAmount: number | null;
+  offerBEquityPct: number | null;
+  selectedChoice: 'none' | 'offer_a' | 'offer_b' | 'reject_both' | null;
+  isChoiceConfirmed: boolean;
+  postRoundFounderEquityPct: number | null;
+
+  // Simulation state flag for row rendering
+  isSimulated: boolean;
+}
+
+export interface TeamIntelligenceDashboardData {
+  event: {
+    id: string;
+    name: string;
+    status: string;
+    totalRounds: number;
+    activeRoundNumber: number;
+  };
+  round: {
+    id: string;
+    roundNumber: number;
+    status: string;
+    type: string;
+    isSimulated: boolean;
+    isPublished: boolean;
+  };
+  rounds: Array<{
+    id: string;
+    roundNumber: number;
+    status: string;
+    type: string;
+  }>;
+  domains: Array<{
+    id: string;
+    code: string;
+    name: string;
+  }>;
+  rows: TeamIntelligenceRow[];
+}
+
+export function generateTeamInsights(input: {
+  snapshot?: CompanySnapshotRecord | null;
+  prevSnapshot?: CompanySnapshotRecord | null;
+  decision?: DecisionRecord | null;
+  roundNumber: number;
+  investorOffer?: TeamInvestorOfferRecord | null;
+}): TeamIntelligenceInsight[] {
+  const insights: TeamIntelligenceInsight[] = [];
+  const { snapshot, prevSnapshot, roundNumber, investorOffer } = input;
+
+  if (snapshot) {
+    // 1. Stockout warning
+    if (snapshot.units_stockout > 0) {
+      const totalDemand = snapshot.units_sold + snapshot.units_stockout;
+      const unfulfilledPct = totalDemand > 0 ? ((snapshot.units_stockout / totalDemand) * 100).toFixed(1) : '0.0';
+      insights.push({
+        id: 'stockout-' + (snapshot.id || Math.random()),
+        type: 'warning',
+        category: 'stockout',
+        title: 'Demand Exceeded Inventory',
+        message: 'Company stocked out of ' + snapshot.units_stockout.toLocaleString('en-US') + ' units (' + unfulfilledPct + '% unfulfilled demand), leaving uncaptured revenue.',
+      });
+    }
+
+    // 2. Inventory holding burden
+    if (snapshot.ending_inventory > 0 && snapshot.inventory_holding_cost > 0) {
+      insights.push({
+        id: 'inventory-' + (snapshot.id || Math.random()),
+        type: 'warning',
+        category: 'inventory_burden',
+        title: 'Inventory Holding Burden',
+        message: 'Carried ' + snapshot.ending_inventory.toLocaleString('en-US') + ' unsold units incurring $' + Math.round(snapshot.inventory_holding_cost).toLocaleString('en-US') + ' in holding costs.',
+      });
+    }
+
+    // 3. Cash runway risk / liquidity health
+    if (snapshot.ending_cash < 0) {
+      insights.push({
+        id: 'cash-negative-' + (snapshot.id || Math.random()),
+        type: 'warning',
+        category: 'cash_runway',
+        title: 'Insolvency Risk (Negative Cash)',
+        message: 'Ending cash deficit of -$' + Math.abs(Math.round(snapshot.ending_cash)).toLocaleString('en-US') + ' requires urgent capital restructuring or operational cost cuts.',
+      });
+    } else if (snapshot.ending_cash < 50000) {
+      insights.push({
+        id: 'cash-low-' + (snapshot.id || Math.random()),
+        type: 'warning',
+        category: 'cash_runway',
+        title: 'Critical Cash Runway',
+        message: 'Cash balance of $' + Math.round(snapshot.ending_cash).toLocaleString('en-US') + ' is dangerously tight heading into subsequent rounds.',
+      });
+    } else if (snapshot.ending_cash >= 150000) {
+      insights.push({
+        id: 'cash-healthy-' + (snapshot.id || Math.random()),
+        type: 'success',
+        category: 'cash_runway',
+        title: 'Strong Cash Position',
+        message: 'Treasury of $' + Math.round(snapshot.ending_cash).toLocaleString('en-US') + ' provides substantial operational buffer and strategic flexibility.',
+      });
+    }
+
+    // 4. Margins and profitability
+    if (snapshot.net_income > 0) {
+      const margin = snapshot.gross_revenue > 0 ? ((snapshot.net_income / snapshot.gross_revenue) * 100).toFixed(1) : '0.0';
+      insights.push({
+        id: 'profit-' + (snapshot.id || Math.random()),
+        type: 'success',
+        category: 'margin_health',
+        title: 'Profitable Operations',
+        message: 'Generated $' + Math.round(snapshot.net_income).toLocaleString('en-US') + ' net income with a ' + margin + '% net margin on $' + Math.round(snapshot.gross_revenue).toLocaleString('en-US') + ' gross revenue.',
+      });
+    } else if (snapshot.gross_profit < 0) {
+      insights.push({
+        id: 'negative-gross-' + (snapshot.id || Math.random()),
+        type: 'warning',
+        category: 'margin_health',
+        title: 'Negative Gross Margin',
+        message: 'COGS ($' + Math.round(snapshot.cogs).toLocaleString('en-US') + ') exceeded gross revenue ($' + Math.round(snapshot.gross_revenue).toLocaleString('en-US') + '); unit pricing does not cover unit production cost.',
+      });
+    } else if (snapshot.net_income < 0) {
+      insights.push({
+        id: 'opex-burden-' + (snapshot.id || Math.random()),
+        type: 'warning',
+        category: 'margin_health',
+        title: 'Operating Loss',
+        message: 'Operating expenses ($' + Math.round(snapshot.operating_expenses).toLocaleString('en-US') + ') exceeded gross profit ($' + Math.round(snapshot.gross_profit).toLocaleString('en-US') + '), driving a net loss of $' + Math.abs(Math.round(snapshot.net_income)).toLocaleString('en-US') + '.',
+      });
+    }
+
+    // 5. Domain Category Leadership
+    if (snapshot.domain_rank === 1) {
+      insights.push({
+        id: 'leader-' + (snapshot.id || Math.random()),
+        type: 'success',
+        category: 'market_share',
+        title: 'Domain Category Leader',
+        message: 'Rank #1 in domain with ' + (snapshot.market_share_pct * 100).toFixed(1) + '% market share and $' + Math.round(snapshot.company_valuation).toLocaleString('en-US') + ' valuation.',
+      });
+    }
+
+    // 6. Rank momentum
+    if (prevSnapshot && typeof prevSnapshot.domain_rank === 'number' && typeof snapshot.domain_rank === 'number') {
+      const delta = prevSnapshot.domain_rank - snapshot.domain_rank;
+      if (delta > 0) {
+        insights.push({
+          id: 'rank-up-' + (snapshot.id || Math.random()),
+          type: 'opportunity',
+          category: 'rank_momentum',
+          title: 'Ascending Standings',
+          message: 'Moved up +' + delta + (delta === 1 ? ' position' : ' positions') + ' from #' + prevSnapshot.domain_rank + ' to #' + snapshot.domain_rank + ' in domain standings.',
+        });
+      } else if (delta < 0) {
+        insights.push({
+          id: 'rank-down-' + (snapshot.id || Math.random()),
+          type: 'warning',
+          category: 'rank_momentum',
+          title: 'Dropped Standings',
+          message: 'Dropped ' + Math.abs(delta) + (Math.abs(delta) === 1 ? ' position' : ' positions') + ' from #' + prevSnapshot.domain_rank + ' to #' + snapshot.domain_rank + ' in domain standings.',
+        });
+      }
+    }
+  }
+
+  // 7. Centralized investor choice (Rounds 2 & 4)
+  if (roundNumber === 2 || roundNumber === 4) {
+    if (investorOffer) {
+      if (investorOffer.selected_choice === 'offer_a') {
+        insights.push({
+          id: 'investor-offer-a-' + (investorOffer.id || Math.random()),
+          type: 'info',
+          category: 'investor_action',
+          title: 'Capital Round Secured',
+          message: 'Accepted Offer A: $' + investorOffer.offer_a_amount.toLocaleString('en-US') + ' for ' + investorOffer.offer_a_equity_pct + '% equity (' + (investorOffer.is_confirmed ? 'Confirmed' : 'Pending Confirmation') + ').',
+        });
+      } else if (investorOffer.selected_choice === 'offer_b') {
+        insights.push({
+          id: 'investor-offer-b-' + (investorOffer.id || Math.random()),
+          type: 'info',
+          category: 'investor_action',
+          title: 'Capital Round Secured',
+          message: 'Accepted Offer B: $' + investorOffer.offer_b_amount.toLocaleString('en-US') + ' for ' + investorOffer.offer_b_equity_pct + '% equity (' + (investorOffer.is_confirmed ? 'Confirmed' : 'Pending Confirmation') + ').',
+        });
+      } else if (investorOffer.selected_choice === 'reject_both') {
+        insights.push({
+          id: 'investor-reject-' + (investorOffer.id || Math.random()),
+          type: 'info',
+          category: 'investor_action',
+          title: 'Bootstrapped Strategy',
+          message: 'Rejected both investor offers, preserving 100% founder equity without dilution.',
+        });
+      }
+    }
+  }
+
+  return insights;
+}
+
 
 /**
  * CAPITAL QUEST — BACKEND OPERATIONS SERVICE
@@ -4056,6 +4324,304 @@ export class TournamentService {
       topThreeCandidates,
       topThreeCandidatePreview: topThreeCandidates,
       domainChampions,
+    };
+  }
+
+  
+  /**
+   * REQUIREMENT 3: CENTRALIZED TEAM INTELLIGENCE DASHBOARD
+   * Batched retrieval across all teams, active domains, and rounds.
+   */
+  async getTeamIntelligence(params: {
+    roundNumber?: number;
+    eventId?: string;
+  }): Promise<TeamIntelligenceDashboardData> {
+    const { roundNumber, eventId } = params;
+
+    // 1. Resolve target event
+    let targetEventId: string;
+    let event: PresentationEventRecord;
+
+    if (!eventId) {
+      const activeEvent = await this.getActiveEvent();
+      if (!activeEvent) throw new AppError('NOT_FOUND', 'No active tournament event found', 404);
+      targetEventId = activeEvent.id;
+      event = activeEvent;
+    } else {
+      targetEventId = eventId;
+      const { data: evData, error: evErr } = await this.supabase
+        .from('events')
+        .select('id, name, status, total_rounds, active_round_number')
+        .eq('id', targetEventId)
+        .single();
+      if (evErr || !evData) throw new AppError('NOT_FOUND', 'Event not found: ' + targetEventId, 404);
+      event = evData;
+    }
+
+    // 2. Fetch all rounds for this event
+    const { data: roundsData, error: roundsErr } = await this.supabase
+      .from('rounds')
+      .select('id, round_number, status, type')
+      .eq('event_id', targetEventId)
+      .order('round_number', { ascending: true });
+
+    if (roundsErr) throw new AppError('NOT_FOUND', 'Failed to load rounds: ' + roundsErr.message, 500);
+    const allRounds = roundsData || [];
+
+    // 3. Resolve target round
+    let targetRound = allRounds.find(r => r.round_number === roundNumber);
+    if (!targetRound) {
+      if (typeof event.active_round_number === 'number') {
+        targetRound = allRounds.find(r => r.round_number === event.active_round_number);
+      }
+      if (!targetRound) {
+        targetRound = allRounds[0];
+      }
+    }
+
+    if (!targetRound) {
+      return {
+        event: {
+          id: event.id,
+          name: event.name,
+          status: event.status,
+          totalRounds: event.total_rounds ?? 5,
+          activeRoundNumber: event.active_round_number ?? 1,
+        },
+        round: {
+          id: '',
+          roundNumber: roundNumber ?? 1,
+          status: 'draft',
+          type: 'regular',
+          isSimulated: false,
+          isPublished: false,
+        },
+        rounds: [],
+        domains: [],
+        rows: [],
+      };
+    }
+
+    // 4. Fetch domains
+    const { data: domainsData, error: domainsErr } = await this.supabase
+      .from('domains')
+      .select('id, code, name')
+      .eq('event_id', targetEventId)
+      .order('code', { ascending: true });
+
+    if (domainsErr) throw new AppError('NOT_FOUND', 'Failed to load domains: ' + domainsErr.message, 500);
+    const domains = domainsData || [];
+    const domainMap = new Map<string, { id: string; code: string; name: string }>();
+    domains.forEach(d => domainMap.set(d.id, d));
+
+    // 5. Fetch teams
+    const { data: teamsData, error: teamsErr } = await this.supabase
+      .from('teams')
+      .select('id, event_id, domain_id, team_code, company_name, table_station, is_disqualified')
+      .eq('event_id', targetEventId)
+      .order('team_code', { ascending: true });
+
+    if (teamsErr) throw new AppError('NOT_FOUND', 'Failed to load teams: ' + teamsErr.message, 500);
+    const teams = teamsData || [];
+
+    // 6. Find previous round if applicable
+    const previousRound = targetRound.round_number > 1
+      ? allRounds.find(r => r.round_number === targetRound!.round_number - 1)
+      : null;
+
+    // 7. Parallel fetch: decisions, snapshots, previous snapshots, investor offers
+    const [decisionsRes, snapshotsRes, prevSnapshotsRes, investorOffersRes] = await Promise.all([
+      this.supabase
+        .from('decisions')
+        .select('*')
+        .eq('round_id', targetRound.id),
+      this.supabase
+        .from('company_snapshots')
+        .select('*')
+        .eq('round_id', targetRound.id)
+        .eq('is_active', true),
+      previousRound
+        ? this.supabase
+            .from('company_snapshots')
+            .select('*')
+            .eq('round_id', previousRound.id)
+            .eq('is_active', true)
+        : Promise.resolve({ data: [] as CompanySnapshotRecord[], error: null }),
+      this.supabase
+        .from('team_investor_offers')
+        .select('*')
+        .eq('round_id', targetRound.id),
+    ]);
+
+    if (decisionsRes.error) throw new AppError('NOT_FOUND', 'Failed to load decisions: ' + decisionsRes.error.message, 500);
+    if (snapshotsRes.error) throw new AppError('NOT_FOUND', 'Failed to load company snapshots: ' + snapshotsRes.error.message, 500);
+    if (prevSnapshotsRes.error) throw new AppError('NOT_FOUND', 'Failed to load previous snapshots: ' + prevSnapshotsRes.error.message, 500);
+    if (investorOffersRes.error) throw new AppError('NOT_FOUND', 'Failed to load investor offers: ' + investorOffersRes.error.message, 500);
+
+    const decisionsMap = new Map<string, DecisionRecord>();
+    ((decisionsRes.data as DecisionRecord[]) || []).forEach(d => decisionsMap.set(d.team_id, d));
+
+    const snapshotsMap = new Map<string, CompanySnapshotRecord>();
+    ((snapshotsRes.data as CompanySnapshotRecord[]) || []).forEach(s => snapshotsMap.set(s.team_id, s));
+
+    const prevSnapshotsMap = new Map<string, CompanySnapshotRecord>();
+    ((prevSnapshotsRes.data as CompanySnapshotRecord[]) || []).forEach(s => prevSnapshotsMap.set(s.team_id, s));
+
+    const investorOffersMap = new Map<string, TeamInvestorOfferRecord>();
+    ((investorOffersRes.data as TeamInvestorOfferRecord[]) || []).forEach(o => investorOffersMap.set(o.team_id, o));
+
+    const isRoundSimulated = Boolean(['simulated', 'reviewed', 'published'].includes(targetRound.status) || (snapshotsRes.data && (snapshotsRes.data as unknown[]).length > 0));
+    const isRoundPublished = targetRound.status === 'published';
+
+    // 8. Map rows
+    const rows: TeamIntelligenceRow[] = teams.map(team => {
+      const domain = domainMap.get(team.domain_id);
+      const decision = decisionsMap.get(team.id);
+      const snapshot = snapshotsMap.get(team.id);
+      const prevSnapshot = prevSnapshotsMap.get(team.id);
+      const investorOffer = investorOffersMap.get(team.id);
+
+      let decisionStatus: 'draft' | 'submitted' | 'confirmed' | 'missing' = 'missing';
+      if (decision) {
+        if (decision.status === 'unsubmitted') decisionStatus = 'draft';
+        else if (decision.status === 'entered') decisionStatus = 'submitted';
+        else if (decision.status === 'verified' || decision.status === 'locked') decisionStatus = 'confirmed';
+        else decisionStatus = 'submitted';
+      }
+
+      const hasSnapshot = Boolean(snapshot);
+
+      const previousDomainRank = prevSnapshot && typeof prevSnapshot.domain_rank === 'number' ? prevSnapshot.domain_rank : null;
+      const currentDomainRank = snapshot && typeof snapshot.domain_rank === 'number' ? snapshot.domain_rank : null;
+      let rankDelta: number | null = null;
+      if (previousDomainRank !== null && currentDomainRank !== null) {
+        rankDelta = previousDomainRank - currentDomainRank;
+      }
+
+      const insights = generateTeamInsights({
+        snapshot,
+        prevSnapshot,
+        decision,
+        roundNumber: targetRound!.round_number,
+        investorOffer,
+      });
+
+      const selectedChoice = investorOffer?.selected_choice ?? (decision?.investment_decision as InvestmentChoice) ?? 'none';
+      const isChoiceConfirmed = investorOffer?.is_confirmed ?? false;
+      const postRoundFounderEquityPct = snapshot?.retained_equity_pct ?? null;
+
+      return {
+        // Group A
+        teamId: team.id,
+        companyId: team.id,
+        teamCode: team.team_code,
+        companyName: team.company_name,
+        domainId: team.domain_id,
+        domainCode: domain?.code ?? 'UNKNOWN',
+        domainName: domain?.name ?? 'Unknown Domain',
+        tableStation: team.table_station || null,
+        status: team.is_disqualified ? 'disqualified' : 'active',
+        decisionStatus,
+
+        // Group B
+        marketingSpend: decision?.marketing_budget ?? 0,
+        rdSpend: decision?.rd_budget ?? 0,
+        productionUnits: decision?.production_units ?? 0,
+        unitSellingPrice: decision?.unit_price ?? 0,
+        operationsBudget: decision?.operations_budget ?? 0,
+        investmentDecision: (decision?.investment_decision as InvestmentChoice) ?? 'none',
+
+        // Group C
+        productionCost: hasSnapshot ? snapshot!.cogs : 0,
+        unitsAvailable: hasSnapshot ? snapshot!.units_available : null,
+        unitsSold: hasSnapshot ? snapshot!.units_sold : null,
+        endingInventory: hasSnapshot ? snapshot!.ending_inventory : null,
+        unitsStockout: hasSnapshot ? snapshot!.units_stockout : null,
+        marketSharePct: hasSnapshot ? snapshot!.market_share_pct : null,
+        potentialDemand: hasSnapshot ? snapshot!.potential_demand : null,
+        productQualityIndex: hasSnapshot ? snapshot!.product_quality_index : null,
+        brandEquityScore: hasSnapshot ? snapshot!.brand_equity_score : null,
+
+        // Group D
+        grossRevenue: hasSnapshot ? snapshot!.gross_revenue : null,
+        cogs: hasSnapshot ? snapshot!.cogs : null,
+        grossProfit: hasSnapshot ? snapshot!.gross_profit : null,
+        operatingExpenses: hasSnapshot ? snapshot!.operating_expenses : null,
+        inventoryHoldingCost: hasSnapshot ? snapshot!.inventory_holding_cost : null,
+        ebitda: hasSnapshot ? snapshot!.ebitda : null,
+        taxExpense: hasSnapshot ? snapshot!.tax_expense : null,
+        netIncome: hasSnapshot ? snapshot!.net_income : null,
+        operatingCashFlow: hasSnapshot ? snapshot!.operating_cash_flow : null,
+        financingCashFlow: hasSnapshot ? snapshot!.financing_cash_flow : null,
+        endingCash: hasSnapshot ? snapshot!.ending_cash : null,
+        enterpriseValue: hasSnapshot ? snapshot!.enterprise_value : null,
+        companyValuation: hasSnapshot ? snapshot!.company_valuation : null,
+
+        // Group E
+        retainedEquityPct: hasSnapshot ? snapshot!.retained_equity_pct : null,
+        equityAdjustedScore: hasSnapshot ? snapshot!.equity_adjusted_score : null,
+        domainRank: currentDomainRank,
+        previousDomainRank,
+        rankDelta,
+
+        // Group F
+        insights,
+
+        // Group G
+        hasInvestorOffers: Boolean(investorOffer),
+        offerAAmount: investorOffer?.offer_a_amount ?? null,
+        offerAEquityPct: investorOffer?.offer_a_equity_pct ?? null,
+        offerBAmount: investorOffer?.offer_b_amount ?? null,
+        offerBEquityPct: investorOffer?.offer_b_equity_pct ?? null,
+        selectedChoice,
+        isChoiceConfirmed,
+        postRoundFounderEquityPct,
+
+        isSimulated: hasSnapshot,
+      };
+    });
+
+    // Sort by domainCode ASC, domainRank ASC (nulls last), teamCode ASC
+    rows.sort((a, b) => {
+      if (a.domainCode !== b.domainCode) {
+        return a.domainCode.localeCompare(b.domainCode);
+      }
+      if (a.domainRank !== null && b.domainRank !== null) {
+        return a.domainRank - b.domainRank;
+      }
+      if (a.domainRank !== null) return -1;
+      if (b.domainRank !== null) return 1;
+      return a.teamCode.localeCompare(b.teamCode);
+    });
+
+    return {
+      event: {
+        id: event.id,
+        name: event.name,
+        status: event.status,
+        totalRounds: event.total_rounds ?? 5,
+        activeRoundNumber: event.active_round_number ?? 1,
+      },
+      round: {
+        id: targetRound.id,
+        roundNumber: targetRound.round_number,
+        status: targetRound.status,
+        type: targetRound.type,
+        isSimulated: isRoundSimulated,
+        isPublished: isRoundPublished,
+      },
+      rounds: allRounds.map(r => ({
+        id: r.id,
+        roundNumber: r.round_number,
+        status: r.status,
+        type: r.type,
+      })),
+      domains: domains.map(d => ({
+        id: d.id,
+        code: d.code,
+        name: d.name,
+      })),
+      rows,
     };
   }
 

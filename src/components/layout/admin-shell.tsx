@@ -18,6 +18,7 @@ import {
   PlayCircle,
   Trophy,
   MonitorPlay,
+  BarChart3,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -82,6 +83,12 @@ export function AdminShell({
       href: '/admin/decisions',
       icon: FileSpreadsheet,
       roles: ['super_admin'],
+    },
+    {
+      title: 'Team Intelligence',
+      href: '/admin/team-intelligence',
+      icon: BarChart3,
+      roles: ['super_admin', 'judge', 'domain_coordinator'],
     },
     {
       title: 'Round Readiness',
