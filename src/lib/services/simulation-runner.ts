@@ -122,25 +122,45 @@ export function mapDatabaseDecisionToEngine(dbDecision: {
 /**
  * Maps database active snapshot record to engine CompanySnapshot type.
  */
-export function mapDatabaseSnapshotToEngine(dbSnapshot: {
-  team_id: string;
-  round_number?: number;
-  ending_cash: number | string;
-  ending_inventory: number;
-  cogs: number | string;
-  cumulative_rd_asset: number | string;
-  brand_equity_score: number | string;
-  retained_equity_pct: number | string;
-  company_valuation: number | string;
-  domain_rank?: number;
-  tournament_rank?: number;
-}): CompanySnapshot {
+export function mapDatabaseSnapshotToEngine(
+  dbSnapshot: {
+    team_id: string;
+    round_number?: number;
+    ending_cash: number | string;
+    ending_inventory: number;
+    cogs: number | string;
+    cumulative_rd_asset: number | string;
+    brand_equity_score: number | string;
+    retained_equity_pct: number | string;
+    company_valuation: number | string;
+    domain_rank?: number;
+    tournament_rank?: number;
+    units_sold?: number;
+  },
+  domainBaseUnitCogs?: Decimal.Value
+): CompanySnapshot {
+  const baseCogs = domainBaseUnitCogs ? D(domainBaseUnitCogs) : D(25);
+  let avgUnitCost = baseCogs;
+
+  const unitsSold = Number(dbSnapshot.units_sold ?? 0);
+  const totalCogs = Number(dbSnapshot.cogs ?? 0);
+
+  if (unitsSold > 0 && totalCogs > 0) {
+    const rawUnitCost = D(totalCogs).div(unitsSold);
+    // Sanity check: unit cost cannot be negative, zero, or absurdly larger than base cogs (max 2.5x baseCogs)
+    if (rawUnitCost.gt(0) && rawUnitCost.lte(baseCogs.mul(2.5))) {
+      avgUnitCost = rawUnitCost;
+    } else {
+      avgUnitCost = baseCogs;
+    }
+  }
+
   return {
     teamId: dbSnapshot.team_id,
     roundNumber: dbSnapshot.round_number ?? 0,
     cash: D(dbSnapshot.ending_cash),
     beginningInventoryUnits: D(dbSnapshot.ending_inventory),
-    inventoryAverageUnitCost: D(dbSnapshot.cogs || 0),
+    inventoryAverageUnitCost: avgUnitCost,
     cumulativeRdStock: D(dbSnapshot.cumulative_rd_asset),
     cumulativeBrandStock: D(dbSnapshot.brand_equity_score),
     retainedEquityPct: D(dbSnapshot.retained_equity_pct),
@@ -542,7 +562,9 @@ export async function executeSimulationRound(
 
       if (prevSnapshots) {
         for (const s of prevSnapshots) {
-          previousSnapshotMap.set(s.team_id, mapDatabaseSnapshotToEngine(s));
+          const domainCode = teamDomainMap.get(s.team_id) ?? 'cleantech';
+          const domainConf = DOMAIN_ARCHETYPES[domainCode] ?? getDomainConfig(domainCode);
+          previousSnapshotMap.set(s.team_id, mapDatabaseSnapshotToEngine(s, domainConf.baseUnitCogs));
         }
       }
     }

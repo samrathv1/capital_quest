@@ -62,7 +62,11 @@ export function resolveInventoryFulfillment(
     );
 
     const beginningUnits = snap?.beginningInventoryUnits ?? ZERO;
-    const priorAvgCost = snap?.inventoryAverageUnitCost ?? unitProdCost;
+    // Defensive protection against corrupted prior average costs (must not exceed 2.5x base unit cogs)
+    const maxReasonableUnitCost = D(domain.baseUnitCogs).times(2.5);
+    const priorAvgCost = (snap?.inventoryAverageUnitCost && snap.inventoryAverageUnitCost.gt(ZERO) && snap.inventoryAverageUnitCost.lte(maxReasonableUnitCost))
+      ? snap.inventoryAverageUnitCost
+      : unitProdCost;
     const unitsAvailable = beginningUnits.plus(actualProducedUnits);
 
     // Weighted average unit cost
